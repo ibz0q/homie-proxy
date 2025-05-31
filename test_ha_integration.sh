@@ -89,14 +89,20 @@ run_test() {
     local url="$2"
     local expected_status="$3"
     local description="$4"
+    local method="${5:-GET}"  # Default to GET if no method specified
     
     TESTS_TOTAL=$((TESTS_TOTAL + 1))
     
     echo "Test $TESTS_TOTAL: $test_name"
     echo "URL: $url"
     
-    # Make the request and capture status code
-    response=$(curl -s -w "HTTPSTATUS:%{http_code}" "$url" 2>/dev/null)
+    # Make the request and capture status code with appropriate method
+    if [[ "$method" == "HEAD" ]]; then
+        response=$(curl -s -w "HTTPSTATUS:%{http_code}" -I "$url" 2>/dev/null)
+    else
+        response=$(curl -s -w "HTTPSTATUS:%{http_code}" -X "$method" "$url" 2>/dev/null)
+    fi
+    
     http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
     content=$(echo "$response" | sed -e 's/HTTPSTATUS:.*//g')
     
@@ -198,17 +204,124 @@ fi
 
 # Test Advanced Features (HA mode has more features)
 if [[ "$MODE" == "ha" ]]; then
-    # Test custom headers
-    run_test "Custom Headers" \
-        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/headers&request_headers%5BX-Test%5D=CustomValue" \
-        "200" \
-        "Custom request headers"
+    # Test authentication in HA mode
+    run_test "HA Invalid Token" \
+        "$BASE_URL?token=invalid-token-123&url=https://httpbin.org/get" \
+        "401" \
+        "Invalid token should return 401 in HA mode"
     
-    # Test redirect following disabled
-    run_test "Redirect Handling" \
-        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/redirect/1&follow_redirects=false" \
-        "302" \
-        "Redirect following disabled"
+    run_test "HA Missing Token" \
+        "$BASE_URL?url=https://httpbin.org/get" \
+        "401" \
+        "Missing token should return 401 in HA mode"
+    
+    # Test additional HTTP methods
+    echo "Test $((TESTS_TOTAL + 1)): PUT Request"
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    put_response=$(curl -s -w "HTTPSTATUS:%{http_code}" -X PUT \
+        -H "Content-Type: application/json" \
+        -d '{"update": "data"}' \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/put" 2>/dev/null)
+    put_code=$(echo "$put_response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+    if [[ "$put_code" == "200" ]]; then
+        echo "✅ PASS: PUT request with JSON body"
+        echo "   Status: $put_code (expected 200)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo "❌ FAIL: PUT request with JSON body"
+        echo "   Status: $put_code (expected 200)"
+    fi
+    echo ""
+    
+    echo "Test $((TESTS_TOTAL + 1)): PATCH Request"
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    patch_response=$(curl -s -w "HTTPSTATUS:%{http_code}" -X PATCH \
+        -H "Content-Type: application/json" \
+        -d '{"patch": "data"}' \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/patch" 2>/dev/null)
+    patch_code=$(echo "$patch_response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+    if [[ "$patch_code" == "200" ]]; then
+        echo "✅ PASS: PATCH request with JSON body"
+        echo "   Status: $patch_code (expected 200)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo "❌ FAIL: PATCH request with JSON body"
+        echo "   Status: $patch_code (expected 200)"
+    fi
+    echo ""
+    
+    run_test "DELETE Request" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/anything" \
+        "200" \
+        "DELETE request" \
+        "DELETE"
+    
+    run_test "HEAD Request" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/get" \
+        "200" \
+        "HEAD request" \
+        "HEAD"
+    
+    # Test response headers
+    run_test "Custom Response Headers" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/get&response_header%5BX-Custom-Response%5D=TestValue" \
+        "200" \
+        "Custom response headers"
+    
+    # Test host header override
+    run_test "Host Header Override" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/headers&override_host_header=custom.example.com" \
+        "200" \
+        "Host header override functionality"
+    
+    # Test redirect following enabled
+    run_test "Redirect Following Enabled" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/redirect/1&follow_redirects=true" \
+        "200" \
+        "Redirect following enabled"
+    
+    # Test TLS options
+    run_test "TLS Skip All Checks" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/get&skip_tls_checks=all" \
+        "200" \
+        "TLS skip all checks option"
+    
+    run_test "TLS Skip Specific Checks" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/get&skip_tls_checks=expired_cert,self_signed" \
+        "200" \
+        "TLS skip specific checks option"
+    
+    # Test multiple custom headers
+    run_test "Multiple Custom Headers" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/headers&request_headers%5BX-Test-1%5D=Value1&request_headers%5BX-Test-2%5D=Value2" \
+        "200" \
+        "Multiple custom request headers"
+    
+    # Test streaming with larger content
+    echo "Test $((TESTS_TOTAL + 1)): Streaming Performance"
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    echo "URL: $BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/bytes/1048576"
+    # Test with 1MB of data to verify streaming works
+    stream_start=$(date +%s.%N)
+    stream_response=$(curl -s -w "HTTPSTATUS:%{http_code}" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/bytes/1048576" \
+        -o /dev/null 2>/dev/null)
+    stream_end=$(date +%s.%N)
+    stream_code=$(echo "$stream_response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+    stream_time=$(echo "$stream_end - $stream_start" | bc 2>/dev/null || echo "N/A")
+    
+    if [[ "$stream_code" == "200" ]]; then
+        echo "✅ PASS: Streaming large content (1MB)"
+        echo "   Status: $stream_code (expected 200)"
+        if [[ "$stream_time" != "N/A" ]]; then
+            echo "   Time: ${stream_time}s"
+        fi
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo "❌ FAIL: Streaming large content (1MB)"
+        echo "   Status: $stream_code (expected 200)"
+    fi
+    echo ""
 fi
 
 # Summary

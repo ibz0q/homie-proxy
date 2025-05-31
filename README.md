@@ -5,6 +5,7 @@ A clean, modern Python reverse proxy server with minimal dependencies that suppo
 ## Features
 
 - **Multiple Proxy Instances**: Configure multiple named proxy instances with different settings
+- **Concurrent Connections**: Multi-threaded server supports simultaneous requests
 - **IP Access Control**: Restrict access to local/external networks or specific CIDR ranges
 - **Token Authentication**: Secure your proxy instances with custom tokens
 - **Rate Limiting**: Per-IP rate limiting to prevent abuse
@@ -166,10 +167,10 @@ curl -X PUT -H "Content-Type: application/json" -d '{"id":1,"status":"updated"}'
   "http://localhost:8080/default?url=https://api.example.com/users/1&token=your-secret-token-here"
 
 # Granular TLS error handling
-curl "http://localhost:8080/default?url=https://self-signed.example.com&token=your-secret-token-here&ignore_tls_errors=self_signed,hostname_mismatch"
+curl "http://localhost:8080/default?url=https://self-signed.example.com&token=your-secret-token-here&skip_tls_checks=self_signed,hostname_mismatch"
 
-# Legacy TLS bypass (use ignore_tls_errors instead)
-curl "http://localhost:8080/default?url=https://self-signed.badssl.com&skip_tls_checks=true&token=your-secret-token-here"
+# Legacy TLS bypass (still works but use specific error types for better security)
+curl "http://localhost:8080/default?url=https://self-signed.badssl.com&skip_tls_checks=all&token=your-secret-token-here"
 ```
 
 #### Caching Examples
@@ -222,16 +223,16 @@ curl "http://localhost:8080/default?url=https://httpbin.org/get&request_headers[
 - `url`: Target URL to proxy to (required)
 - `token`: Authentication token (required if tokens are configured)
 - `cache`: Set to `true` to enable disk caching for this request
-- `ignore_tls_errors`: Comma-separated list of TLS errors to ignore (see TLS Error Types below)
-- `skip_tls_checks`: Set to `true` to bypass all SSL certificate verification (legacy, use ignore_tls_errors instead)
+- `skip_tls_checks`: Comma-separated list of TLS errors to ignore, or `all` to bypass all SSL verification
 - `request_headers[HeaderName]`: Add custom request headers
 - `response_header[HeaderName]`: Add custom response headers
 - `dns_server[]`: Custom DNS servers (placeholder for future implementation)
 
 ### TLS Error Types
 
-The `ignore_tls_errors` parameter accepts a comma-separated list of these error types:
+The `skip_tls_checks` parameter accepts a comma-separated list of these error types:
 
+- `all`: Bypass all SSL certificate verification (complete TLS bypass)
 - `expired_cert`: Ignore expired certificates
 - `self_signed`: Ignore self-signed certificates  
 - `hostname_mismatch`: Ignore hostname/common name mismatches
@@ -240,14 +241,17 @@ The `ignore_tls_errors` parameter accepts a comma-separated list of these error 
 
 Examples:
 ```bash
+# Bypass all TLS verification (not recommended for production)
+skip_tls_checks=all
+
 # Ignore specific error types
-ignore_tls_errors=expired_cert,hostname_mismatch
+skip_tls_checks=expired_cert,hostname_mismatch
 
 # Ignore self-signed certificates only
-ignore_tls_errors=self_signed
+skip_tls_checks=self_signed
 
 # Ignore multiple error types
-ignore_tls_errors=expired_cert,self_signed,cert_authority
+skip_tls_checks=expired_cert,self_signed,cert_authority
 ```
 
 ### Examples by Use Case
@@ -259,13 +263,13 @@ curl "http://localhost:8080/default?url=https://api.example.com/expensive-operat
 
 #### Development Proxy with Granular TLS Control
 ```bash
-curl "http://localhost:8080/internal?url=https://dev-api.local/data&cache=true&ignore_tls_errors=self_signed,expired_cert"
+curl "http://localhost:8080/internal?url=https://dev-api.local/data&cache=true&skip_tls_checks=self_signed,expired_cert"
 ```
 
 #### API Integration with Specific TLS Error Handling
 ```bash
 curl -X POST -H "Content-Type: application/json" -d '{"query":"search"}' \
-  "http://localhost:8080/default?url=https://legacy-api.company.com/search&token=your-token&ignore_tls_errors=weak_cipher,cert_authority"
+  "http://localhost:8080/default?url=https://legacy-api.company.com/search&token=your-token&skip_tls_checks=weak_cipher,cert_authority"
 ```
 
 ## Cache Management
@@ -345,6 +349,7 @@ Common error codes:
 
 ## Performance
 
+- **Concurrent Connections**: Multi-threaded server handles multiple simultaneous requests
 - **Persistent Caching**: Disk-based caching with automatic size management
 - **SHA1 Hashing**: Fast and collision-resistant cache key generation
 - **Streaming**: Large responses are streamed to minimize memory usage

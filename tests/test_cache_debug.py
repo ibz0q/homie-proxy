@@ -23,8 +23,6 @@ try:
     print(f"📥 First - X-Cache: {cache_header1}")
     print(f"📊 First - Size: {len(response1.content)} bytes")
     
-    time.sleep(1)  # Small delay
-    
     print("\n📥 Second request to same JSON endpoint...")
     response2 = requests.get(json_url)
     
@@ -54,8 +52,6 @@ try:
     cache_header1 = response1.headers.get('X-Cache', 'NOT FOUND')
     print(f"📥 First - X-Cache: {cache_header1}")
     print(f"📊 First - Size: {len(response1.content)} bytes")
-    
-    time.sleep(1)
     
     print("\n📥 Second request to same 1KB binary...")
     response2 = requests.get(small_binary_url)

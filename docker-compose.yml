@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  homie-proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./proxy_config.json:/app/proxy_config.json:ro
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s 

@@ -15,21 +15,18 @@ import socket
 import os
 import subprocess
 import select
+import time
 
 try:
     import requests
     from requests.adapters import HTTPAdapter
     import urllib3
     from urllib3.exceptions import InsecureRequestWarning
-    # Note: SubjectAltNameWarning and InsecurePlatformWarning may not exist in newer urllib3 versions
+    # Note: SubjectAltNameWarning may not exist in newer urllib3 versions
     try:
         from urllib3.exceptions import SubjectAltNameWarning
     except ImportError:
         SubjectAltNameWarning = None
-    try:
-        from urllib3.exceptions import InsecurePlatformWarning
-    except ImportError:
-        InsecurePlatformWarning = None
 except ImportError:
     print("Error: 'requests' library is required. Install with: pip install requests")
     exit(1)
@@ -55,8 +52,6 @@ class CustomHTTPSAdapter(HTTPAdapter):
             urllib3.disable_warnings(InsecureRequestWarning)
             if SubjectAltNameWarning is not None:
                 urllib3.disable_warnings(SubjectAltNameWarning)
-            if InsecurePlatformWarning is not None:
-                urllib3.disable_warnings(InsecurePlatformWarning)
         else:
             # Handle specific TLS error types
             if 'expired_cert' in self.skip_tls_checks:
@@ -135,17 +130,12 @@ class HomieProxyHandler(BaseHTTPRequestHandler):
         print(f"[{timestamp}] {format % args}")
     
     def handle_one_request(self):
-        """Handle a single HTTP request with better error handling"""
+        """Override to handle connection errors gracefully"""
         try:
             super().handle_one_request()
-        except ConnectionResetError:
-            # Client disconnected - this is normal, don't log as error
-            pass
-        except BrokenPipeError:
-            # Client disconnected while we were sending data - this is normal
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             pass
         except Exception as e:
-            # Log unexpected errors but don't crash
             self.log_message(f"Request handling error: {e}")
     
     def __getattr__(self, name):
@@ -237,8 +227,6 @@ class HomieProxyHandler(BaseHTTPRequestHandler):
                     urllib3.disable_warnings(InsecureRequestWarning)
                     if SubjectAltNameWarning is not None:
                         urllib3.disable_warnings(SubjectAltNameWarning)
-                    if InsecurePlatformWarning is not None:
-                        urllib3.disable_warnings(InsecurePlatformWarning)
                     self.log_message("Ignoring ALL TLS errors - complete TLS verification disabled")
                 else:
                     # Mount custom HTTPS adapter for specific error types
@@ -254,33 +242,38 @@ class HomieProxyHandler(BaseHTTPRequestHandler):
             else:
                 self.log_message("Redirect following disabled (default)")
             
+            # Handle Host header override logic
+            override_host_header_param = query_params.get('override_host_header', [''])
+            override_host_header = override_host_header_param[0] if override_host_header_param[0] else None
+            
+            # Parse target URL for hostname
+            parsed_target = urllib.parse.urlparse(target_url)
+            original_hostname = parsed_target.hostname
+            
             # Prepare headers - start with original headers from client
             headers = dict(self.headers)
             
-            # Add custom request headers (so they can override defaults)
+            # Add custom request headers first (so they can override defaults)
             for key, values in query_params.items():
                 if key.startswith('request_headers[') and key.endswith(']'):
                     header_name = key[16:-1]  # Remove 'request_headers[' and ']'
                     headers[header_name] = values[0]
             
-            # Handle Host header logic
-            parsed_target = urllib.parse.urlparse(target_url)
-            override_host_header = query_params.get('override_host_header', [None])[0]
-            
+            # Handle Host header logic AFTER custom headers so override takes precedence
             if override_host_header:
                 # Use explicit override
                 headers['Host'] = override_host_header
                 self.log_message(f"Override Host header set to: {override_host_header}")
-            elif parsed_target.hostname:
+            elif original_hostname:
                 # Check if the hostname is an IP address
                 try:
-                    ipaddress.ip_address(parsed_target.hostname)
+                    ipaddress.ip_address(original_hostname)
                     # It's an IP address - don't set Host header
                     headers.pop('Host', None)
-                    self.log_message(f"Target is IP address ({parsed_target.hostname}) - no Host header set")
+                    self.log_message(f"Target is IP address ({original_hostname}) - no Host header set")
                 except ValueError:
                     # It's a hostname - set Host header to hostname only (no port)
-                    headers['Host'] = parsed_target.hostname
+                    headers['Host'] = original_hostname
                     self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
             
             # Always ensure User-Agent is explicitly set (use blank if none provided)
@@ -332,52 +325,85 @@ class HomieProxyHandler(BaseHTTPRequestHandler):
                 else:
                     self.log_message(f"Request body: {body_size} bytes - {body[:100]}{'...' if len(body) > 100 else ''}")
             
-            response = session.request(**request_kwargs)
+            try:
+                response = session.request(**request_kwargs)
+                
+                # Log the response headers received from target
+                self.log_message(f"RESPONSE from {target_url}")
+                self.log_message(f"Response status: {response.status_code}")
+                if response.headers:
+                    self.log_message("Response headers received from target:")
+                    for header_name, header_value in response.headers.items():
+                        # Truncate very long header values for readability
+                        if len(str(header_value)) > 100:
+                            display_value = str(header_value)[:97] + "..."
+                        else:
+                            display_value = header_value
+                        self.log_message(f"  {header_name}: {display_value}")
+                else:
+                    self.log_message("No response headers received from target")
+                
+                # Send response
+                self.send_response(response.status_code)
+                
+                # Send headers - pass through all headers from target
+                for header, value in response.headers.items():
+                    self.send_header(header, value)
+                
+                # Add custom response headers
+                for key, values in query_params.items():
+                    if key.startswith('response_header[') and key.endswith(']'):
+                        header_name = key[16:-1]  # Remove 'response_header[' and ']'
+                        self.send_header(header_name, values[0])
+                
+                self.end_headers()
+                
+                # Stream response data directly with connection abort detection
+                self.log_message("Streaming response directly")
+                bytes_transferred = 0
+                connection_aborted = False
+                
+                try:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            try:
+                                self.wfile.write(chunk)
+                                self.wfile.flush()  # Ensure data is sent immediately
+                                bytes_transferred += len(chunk)
+                            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                                self.log_message(f"Client disconnected during streaming, {bytes_transferred} bytes sent")
+                                connection_aborted = True
+                                break
+                            except OSError as e:
+                                self.log_message(f"Connection aborted during streaming, {bytes_transferred} bytes sent - cancelling request")
+                                connection_aborted = True
+                                break
+                
+                    if not connection_aborted and bytes_transferred > 0:
+                        self.log_message(f"Streamed {bytes_transferred} bytes successfully")
+                    elif connection_aborted:
+                        self.log_message(f"Request cancelled due to connection issues")
+                        
+                except Exception as stream_error:
+                    self.log_message(f"Streaming error: {stream_error}")
+                    connection_aborted = True
+                
+                # If connection was aborted, don't continue processing
+                if connection_aborted:
+                    return  # Exit early to prevent further errors
+                
+            except requests.exceptions.RequestException as e:
+                self.log_message(f"Request error: {e}")
+                self.send_error_response(502, f"Bad Gateway: {str(e)}")
+                    
+            except OSError as e:
+                self.log_message(f"OS error: {e}")
+                self.send_error_response(500, "Internal server error")
             
-            # Log the response headers received from target
-            self.log_message(f"RESPONSE from {target_url}")
-            self.log_message(f"Response status: {response.status_code}")
-            if response.headers:
-                self.log_message("Response headers received from target:")
-                for header_name, header_value in response.headers.items():
-                    # Truncate very long header values for readability
-                    if len(str(header_value)) > 100:
-                        display_value = str(header_value)[:97] + "..."
-                    else:
-                        display_value = header_value
-                    self.log_message(f"  {header_name}: {display_value}")
-            else:
-                self.log_message("No response headers received from target")
+            finally:
+                # Always close the session to prevent connection pooling issues
+                session.close()
             
-            # Send response
-            self.send_response(response.status_code)
-            
-            # Send headers - pass through all headers from target
-            for header, value in response.headers.items():
-                self.send_header(header, value)
-            
-            # Add custom response headers
-            for key, values in query_params.items():
-                if key.startswith('response_header[') and key.endswith(']'):
-                    header_name = key[16:-1]  # Remove 'response_header[' and ']'
-                    self.send_header(header_name, values[0])
-            
-            self.end_headers()
-            
-            # Stream response data directly
-            self.log_message("Streaming response directly")
-            bytes_transferred = 0
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    self.wfile.write(chunk)
-                    bytes_transferred += len(chunk)
-            
-            if bytes_transferred > 0:
-                self.log_message(f"Streamed {bytes_transferred} bytes")
-            
-        except requests.exceptions.RequestException as e:
-            self.log_message(f"Request error: {e}")
-            self.send_error_response(502, f"Bad Gateway: {str(e)}")
         except Exception as e:
             self.log_message(f"Proxy error: {e}")
             self.send_error_response(500, "Internal server error")
@@ -482,16 +508,11 @@ class HomieProxyServer:
                 
                 # Try to show what's using the port
                 try:
-                    if os.name == 'nt':  # Windows
-                        result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
-                        for line in result.stdout.split('\n'):
-                            if f':{port}' in line and 'LISTENING' in line:
-                                print(f"   Process using port: {line.strip()}")
-                                break
-                    else:  # Unix/Linux
-                        result = subprocess.run(['lsof', '-i', f':{port}'], capture_output=True, text=True)
-                        if result.stdout:
-                            print(f"   Process using port: {result.stdout}")
+                    result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
+                    for line in result.stdout.split('\n'):
+                        if f':{port}' in line and 'LISTENING' in line:
+                            print(f"   Process using port: {line.strip()}")
+                            break
                 except:
                     pass
                 
@@ -507,7 +528,7 @@ class HomieProxyServer:
             test_socket.close()
         except OSError as e:
             print(f"ERROR: Cannot bind to {host}:{port}")
-            if "Address already in use" in str(e) or e.errno == 98:
+            if "Address already in use" in str(e):
                 print(f"   Port {port} is already in use by another process")
                 print(f"   Please stop the other process or use a different port with --port")
             else:
@@ -536,6 +557,7 @@ class HomieProxyServer:
         except KeyboardInterrupt:
             print("\nShutting down server...")
             server.shutdown()
+            server.server_close()
             print("Server stopped successfully")
 
 

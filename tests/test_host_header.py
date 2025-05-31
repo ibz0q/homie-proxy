@@ -43,7 +43,7 @@ for i, test_case in enumerate(test_cases, 1):
     
     try:
         print("   📥 Making request...")
-        response = requests.get(test_url, timeout=10)
+        response = requests.get(test_url, timeout=8)
         
         print(f"   ✅ Status: {response.status_code}")
         
@@ -77,7 +77,7 @@ print("   Testing if custom Host header via request_headers overrides the fix")
 override_url = f"{base_url}&url=https://httpbin.org/headers&request_headers[Host]=custom.example.com"
 try:
     print("   📥 Making request with custom Host header...")
-    response = requests.get(override_url, timeout=10)
+    response = requests.get(override_url, timeout=8)
     
     print(f"   ✅ Status: {response.status_code}")
     

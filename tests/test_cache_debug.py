@@ -14,7 +14,7 @@ print("\n📄 Test 1: JSON file caching")
 json_url = f"{base_url}&url=https://httpbin.org/json&cache=true"
 try:
     print("📥 First request to JSON endpoint...")
-    response1 = requests.get(json_url)
+    response1 = requests.get(json_url, timeout=8)
     
     print(f"✅ First - Status: {response1.status_code}")
     print(f"📥 First - Content-Type: {response1.headers.get('Content-Type', 'N/A')}")
@@ -24,7 +24,7 @@ try:
     print(f"📊 First - Size: {len(response1.content)} bytes")
     
     print("\n📥 Second request to same JSON endpoint...")
-    response2 = requests.get(json_url)
+    response2 = requests.get(json_url, timeout=8)
     
     print(f"✅ Second - Status: {response2.status_code}")
     cache_header2 = response2.headers.get('X-Cache', 'NOT FOUND')
@@ -44,7 +44,7 @@ print("\n📄 Test 2: Very small binary file (1KB)")
 small_binary_url = f"{base_url}&url=https://httpbin.org/bytes/1024&cache=true"
 try:
     print("📥 First request to 1KB binary...")
-    response1 = requests.get(small_binary_url)
+    response1 = requests.get(small_binary_url, timeout=8)
     
     print(f"✅ First - Status: {response1.status_code}")
     print(f"📥 First - Content-Type: {response1.headers.get('Content-Type', 'N/A')}")
@@ -54,7 +54,7 @@ try:
     print(f"📊 First - Size: {len(response1.content)} bytes")
     
     print("\n📥 Second request to same 1KB binary...")
-    response2 = requests.get(small_binary_url)
+    response2 = requests.get(small_binary_url, timeout=8)
     
     print(f"✅ Second - Status: {response2.status_code}")
     cache_header2 = response2.headers.get('X-Cache', 'NOT FOUND')

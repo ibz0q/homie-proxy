@@ -25,7 +25,7 @@ def test_basic_get():
     }
     
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=8)
         print(f"Status: {response.status_code}")
         print(f"Response: {response.json()}")
         print("✓ Basic GET test passed\n")
@@ -46,7 +46,7 @@ def test_disk_cache():
     try:
         # First request - should be cached
         print("Making first request (should cache)...")
-        response1 = requests.get(url, params=params)
+        response1 = requests.get(url, params=params, timeout=8)
         print(f"Status: {response1.status_code}")
         print(f"Cache header: {response1.headers.get('X-Cache', 'MISS')}")
         uuid1 = response1.json().get('uuid')
@@ -54,7 +54,7 @@ def test_disk_cache():
         
         # Second request - should hit cache
         print("Making second request (should hit cache)...")
-        response2 = requests.get(url, params=params)
+        response2 = requests.get(url, params=params, timeout=8)
         print(f"Status: {response2.status_code}")
         print(f"Cache header: {response2.headers.get('X-Cache', 'MISS')}")
         uuid2 = response2.json().get('uuid')
@@ -84,7 +84,7 @@ def test_cache_with_different_params():
         params1 = base_params.copy()
         params1['request_headers[X-Test]'] = 'value1'
         
-        response1 = requests.get(base_url, params=params1)
+        response1 = requests.get(base_url, params=params1, timeout=8)
         uuid1 = response1.json().get('uuid')
         print(f"Request 1 UUID: {uuid1}")
         
@@ -92,12 +92,12 @@ def test_cache_with_different_params():
         params2 = base_params.copy()
         params2['request_headers[X-Test]'] = 'value2'
         
-        response2 = requests.get(base_url, params=params2)
+        response2 = requests.get(base_url, params=params2, timeout=8)
         uuid2 = response2.json().get('uuid')
         print(f"Request 2 UUID: {uuid2}")
         
         # Same request as first - should hit cache
-        response3 = requests.get(base_url, params=params1)
+        response3 = requests.get(base_url, params=params1, timeout=8)
         uuid3 = response3.json().get('uuid')
         print(f"Request 3 UUID: {uuid3}")
         print(f"Request 3 Cache: {response3.headers.get('X-Cache', 'MISS')}")
@@ -123,7 +123,7 @@ def test_post_request():
     data = {'test': 'data', 'timestamp': time.time()}
     
     try:
-        response = requests.post(url, params=params, json=data)
+        response = requests.post(url, params=params, json=data, timeout=8)
         print(f"Status: {response.status_code}")
         result = response.json()
         print(f"Received data: {result.get('json', {})}")
@@ -146,12 +146,12 @@ def test_post_with_cache():
     
     try:
         # First POST request
-        response1 = requests.post(url, params=params, json=data)
+        response1 = requests.post(url, params=params, json=data, timeout=8)
         print(f"First POST Status: {response1.status_code}")
         print(f"First POST Cache: {response1.headers.get('X-Cache', 'MISS')}")
         
         # Second identical POST request - should hit cache
-        response2 = requests.post(url, params=params, json=data)
+        response2 = requests.post(url, params=params, json=data, timeout=8)
         print(f"Second POST Status: {response2.status_code}")
         print(f"Second POST Cache: {response2.headers.get('X-Cache', 'MISS')}")
         
@@ -178,7 +178,7 @@ def test_custom_headers():
     }
     
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=8)
         print(f"Status: {response.status_code}")
         
         # Check response headers
@@ -206,7 +206,7 @@ def test_tls_bypass():
     }
     
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=8)
         print(f"Status: {response.status_code}")
         if response.status_code == 200:
             print("✓ TLS bypass test passed\n")
@@ -225,7 +225,7 @@ def test_internal_instance():
     }
     
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=8)
         print(f"Status: {response.status_code}")
         if response.status_code == 200:
             print("✓ Internal instance test passed\n")
@@ -250,7 +250,7 @@ def test_rate_limiting():
     # Make multiple requests quickly
     for i in range(5):
         try:
-            response = requests.get(url, params=params, timeout=5)
+            response = requests.get(url, params=params, timeout=8)
             if response.status_code == 200:
                 success_count += 1
             elif response.status_code == 429:
@@ -272,7 +272,7 @@ def test_error_handling():
     
     # Test missing instance
     try:
-        response = requests.get(f"{BASE_URL}/nonexistent?url=https://httpbin.org/get")
+        response = requests.get(f"{BASE_URL}/nonexistent?url=https://httpbin.org/get", timeout=8)
         if response.status_code == 404:
             print("✓ Missing instance error handled correctly")
         else:
@@ -282,7 +282,7 @@ def test_error_handling():
     
     # Test missing URL
     try:
-        response = requests.get(f"{BASE_URL}/default?token=your-secret-token-here")
+        response = requests.get(f"{BASE_URL}/default?token=your-secret-token-here", timeout=8)
         if response.status_code == 400:
             print("✓ Missing URL error handled correctly")
         else:
@@ -292,7 +292,7 @@ def test_error_handling():
     
     # Test invalid token
     try:
-        response = requests.get(f"{BASE_URL}/default?url=https://httpbin.org/get&token=invalid")
+        response = requests.get(f"{BASE_URL}/default?url=https://httpbin.org/get&token=invalid", timeout=8)
         if response.status_code == 401:
             print("✓ Invalid token error handled correctly")
         else:
@@ -322,7 +322,7 @@ def test_proxy_headers_filtered():
     }
     
     try:
-        response = requests.get(url, params=params, headers=headers)
+        response = requests.get(url, params=params, headers=headers, timeout=8)
         print(f"Status: {response.status_code}")
         
         # Check what headers were actually sent to the target
@@ -372,7 +372,7 @@ def test_cache_size_management():
                 'cache': 'true'
             }
             
-            response = requests.get(url, params=params)
+            response = requests.get(url, params=params, timeout=8)
             print(f"Request {i+1}: Status {response.status_code}, Cache: {response.headers.get('X-Cache', 'MISS')}")
             
             if response.status_code != 200:
@@ -424,7 +424,7 @@ def test_granular_tls_errors():
             }
             
             print(f"Testing {test['name']} with errors: {test['errors']}")
-            response = requests.get(url, params=params, timeout=10)
+            response = requests.get(url, params=params, timeout=8)
             
             if response.status_code in [200, 400, 404]:  # Any response means TLS was bypassed
                 print(f"✓ {test['name']} - TLS errors ignored successfully")
@@ -450,7 +450,7 @@ def test_post_body_forwarding():
             'token': 'your-secret-token-here'
         }
         
-        response = requests.post(url, params=params, json=json_data)
+        response = requests.post(url, params=params, json=json_data, timeout=8)
         print(f"JSON POST Status: {response.status_code}")
         
         if response.status_code == 200:
@@ -472,7 +472,7 @@ def test_post_body_forwarding():
             'token': 'your-secret-token-here'
         }
         
-        response = requests.post(url, params=params, data=form_data)
+        response = requests.post(url, params=params, data=form_data, timeout=8)
         print(f"Form POST Status: {response.status_code}")
         
         if response.status_code == 200:
@@ -495,7 +495,7 @@ def test_post_body_forwarding():
         }
         
         headers = {'Content-Type': 'text/plain'}
-        response = requests.post(url, params=params, data=raw_data, headers=headers)
+        response = requests.post(url, params=params, data=raw_data, headers=headers, timeout=8)
         print(f"Raw POST Status: {response.status_code}")
         
         if response.status_code == 200:
@@ -525,7 +525,7 @@ def test_put_patch_methods():
             'token': 'your-secret-token-here'
         }
         
-        response = requests.put(url, params=params, json=put_data)
+        response = requests.put(url, params=params, json=put_data, timeout=8)
         print(f"PUT Status: {response.status_code}")
         
         if response.status_code == 200:
@@ -547,7 +547,7 @@ def test_put_patch_methods():
             'token': 'your-secret-token-here'
         }
         
-        response = requests.patch(url, params=params, json=patch_data)
+        response = requests.patch(url, params=params, json=patch_data, timeout=8)
         print(f"PATCH Status: {response.status_code}")
         
         if response.status_code == 200:
@@ -573,7 +573,7 @@ def main():
     
     # Check if proxy is running
     try:
-        response = requests.get(f"{BASE_URL}/nonexistent", timeout=5)
+        response = requests.get(f"{BASE_URL}/nonexistent", timeout=8)
     except requests.exceptions.ConnectionError:
         print("✗ Cannot connect to proxy server. Make sure it's running!")
         print("Run: python reverse_proxy.py")

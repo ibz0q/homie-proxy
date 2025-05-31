@@ -17,7 +17,7 @@ test_url = f"{base_url}&url=https://httpbin.org/get"
 
 try:
     print("Making request...")
-    response = requests.get(test_url, timeout=10)
+    response = requests.get(test_url, timeout=8)
     
     print(f"Status: {response.status_code}")
     print(f"Content-Type: {response.headers.get('Content-Type', 'N/A')}")
@@ -37,7 +37,7 @@ test_url2 = f"{base_url}&url=https://httpbin.org/headers"
 
 try:
     print("Making headers request...")
-    response = requests.get(test_url2, timeout=10)
+    response = requests.get(test_url2, timeout=8)
     
     if response.status_code == 200:
         import json

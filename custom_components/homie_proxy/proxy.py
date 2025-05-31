@@ -6,12 +6,9 @@ import socket
 import ssl
 import json
 import urllib.parse
-import select
-import time
+import asyncio
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from http.server import BaseHTTPRequestHandler
-from io import BytesIO
 
 try:
     import requests
@@ -172,6 +169,121 @@ class ProxyInstance:
         return token in self.tokens
 
 
+def sync_proxy_request(proxy_instance: ProxyInstance, request_data: dict) -> dict:
+    """Synchronous proxy request function that runs in a thread executor"""
+    try:
+        client_ip = request_data['client_ip']
+        method = request_data['method']
+        query_params = request_data['query_params']
+        headers = request_data['headers']
+        body = request_data['body']
+        target_url = request_data['target_url']
+        
+        # All the logging and validation has already been done
+        # This function just does the actual HTTP request
+        
+        # Prepare request session
+        session = requests.Session()
+        
+        # Clear any default User-Agent from the session
+        session.headers.pop('User-Agent', None)
+        
+        # Configure TLS error handling
+        skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
+        if skip_tls_checks_param[0]:
+            skip_tls_value = skip_tls_checks_param[0].lower()
+            
+            # Handle boolean-style values (true/false) and convert to 'all'
+            if skip_tls_value in ['true', '1', 'yes']:
+                skip_tls_checks = ['all']
+                _LOGGER.info("TLS parameter 'true' detected, ignoring ALL TLS errors")
+            else:
+                # Parse comma-separated list of TLS errors to ignore
+                skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
+            
+            # Check for ALL option - completely disable TLS verification
+            if 'all' in skip_tls_checks:
+                session.verify = False
+                urllib3.disable_warnings(InsecureRequestWarning)
+                if SubjectAltNameWarning is not None:
+                    urllib3.disable_warnings(SubjectAltNameWarning)
+                _LOGGER.info("Ignoring ALL TLS errors - complete TLS verification disabled")
+            else:
+                # Mount custom HTTPS adapter for specific error types
+                https_adapter = CustomHTTPSAdapter(skip_tls_checks=skip_tls_checks)
+                session.mount('https://', https_adapter)
+                _LOGGER.info(f"Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
+        
+        # Configure redirect following
+        follow_redirects_param = query_params.get('follow_redirects', ['false'])
+        follow_redirects = follow_redirects_param[0].lower() in ['true', '1', 'yes']
+        
+        # Make the request
+        request_kwargs = {
+            'method': method,
+            'url': target_url,
+            'headers': headers,
+            'stream': True,
+            'timeout': 30,
+            'allow_redirects': follow_redirects
+        }
+        
+        # Add body for methods that support it
+        if body is not None:
+            request_kwargs['data'] = body
+        
+        try:
+            response = session.request(**request_kwargs)
+            
+            # Prepare response headers - pass through all headers from target
+            response_headers = {}
+            excluded_response_headers = {
+                'connection', 'transfer-encoding', 'content-encoding'
+            }
+            
+            for header, value in response.headers.items():
+                if header.lower() not in excluded_response_headers:
+                    response_headers[header] = value
+            
+            # Add custom response headers
+            for key, values in query_params.items():
+                if key.startswith('response_header[') and key.endswith(']'):
+                    header_name = key[16:-1]  # Remove 'response_header[' and ']'
+                    response_headers[header_name] = values[0]
+            
+            # Stream response data directly using the same logic as standalone
+            content_chunks = []
+            bytes_transferred = 0
+            
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    content_chunks.append(chunk)
+                    bytes_transferred += len(chunk)
+            
+            content = b''.join(content_chunks)
+            _LOGGER.info(f"Streamed {bytes_transferred} bytes successfully")
+            
+            return {
+                'success': True,
+                'content': content,
+                'status': response.status_code,
+                'headers': response_headers
+            }
+                    
+        except requests.exceptions.RequestException as e:
+            return {'success': False, 'error': f"Bad Gateway: {str(e)}", 'status': 502}
+                
+        except OSError as e:
+            return {'success': False, 'error': "Internal server error", 'status': 500}
+        
+        finally:
+            # Always close the session to prevent connection pooling issues
+            session.close()
+        
+    except Exception as e:
+        return {'success': False, 'error': "Internal server error", 'status': 500}
+
+
 class HomieProxyRequestHandler:
     """Request handler that mimics BaseHTTPRequestHandler but works with aiohttp"""
     
@@ -273,46 +385,6 @@ class HomieProxyRequestHandler:
                     _LOGGER.error("Failed to read request body: %s", e)
                     return self.send_error_response(400, "Failed to read request body")
             
-            # Prepare request session
-            session = requests.Session()
-            
-            # Clear any default User-Agent from the session
-            session.headers.pop('User-Agent', None)
-            
-            # Configure TLS error handling
-            skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
-            if skip_tls_checks_param[0]:
-                skip_tls_value = skip_tls_checks_param[0].lower()
-                
-                # Handle boolean-style values (true/false) and convert to 'all'
-                if skip_tls_value in ['true', '1', 'yes']:
-                    skip_tls_checks = ['all']
-                    self.log_message("TLS parameter 'true' detected, ignoring ALL TLS errors")
-                else:
-                    # Parse comma-separated list of TLS errors to ignore
-                    skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
-                
-                # Check for ALL option - completely disable TLS verification
-                if 'all' in skip_tls_checks:
-                    session.verify = False
-                    urllib3.disable_warnings(InsecureRequestWarning)
-                    if SubjectAltNameWarning is not None:
-                        urllib3.disable_warnings(SubjectAltNameWarning)
-                    self.log_message("Ignoring ALL TLS errors - complete TLS verification disabled")
-                else:
-                    # Mount custom HTTPS adapter for specific error types
-                    https_adapter = CustomHTTPSAdapter(skip_tls_checks=skip_tls_checks)
-                    session.mount('https://', https_adapter)
-                    self.log_message(f"Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
-            
-            # Configure redirect following
-            follow_redirects_param = query_params.get('follow_redirects', ['false'])
-            follow_redirects = follow_redirects_param[0].lower() in ['true', '1', 'yes']
-            if follow_redirects:
-                self.log_message("Redirect following enabled")
-            else:
-                self.log_message("Redirect following disabled (default)")
-            
             # Handle Host header override logic
             override_host_header_param = query_params.get('override_host_header', [''])
             override_host_header = override_host_header_param[0] if override_host_header_param[0] else None
@@ -360,21 +432,7 @@ class HomieProxyRequestHandler:
             else:
                 self.log_message(f"User-Agent already provided: {headers.get('User-Agent', headers.get('user-agent', 'NOT FOUND'))}")
             
-            # Make the request
-            request_kwargs = {
-                'method': method,
-                'url': target_url,
-                'headers': headers,
-                'stream': True,
-                'timeout': 30,
-                'allow_redirects': follow_redirects
-            }
-            
-            # Add body for methods that support it
-            if body is not None:
-                request_kwargs['data'] = body
-            
-            # Log the request headers being sent to target URL
+            # Log the request details
             self.log_message(f"REQUEST to {target_url}")
             self.log_message(f"Request method: {method}")
             if headers:
@@ -396,75 +454,33 @@ class HomieProxyRequestHandler:
                 else:
                     self.log_message(f"Request body: {body_size} bytes - {body[:100]}{'...' if len(body) > 100 else ''}")
             
-            try:
-                response = session.request(**request_kwargs)
-                
-                # Log the response headers received from target
-                self.log_message(f"RESPONSE from {target_url}")
-                self.log_message(f"Response status: {response.status_code}")
-                if response.headers:
-                    self.log_message("Response headers received from target:")
-                    for header_name, header_value in response.headers.items():
-                        # Truncate very long header values for readability
-                        if len(str(header_value)) > 100:
-                            display_value = str(header_value)[:97] + "..."
-                        else:
-                            display_value = header_value
-                        self.log_message(f"  {header_name}: {display_value}")
-                else:
-                    self.log_message("No response headers received from target")
-                
-                # Prepare response headers - pass through all headers from target
-                response_headers = {}
-                excluded_response_headers = {
-                    'connection', 'transfer-encoding', 'content-encoding'
-                }
-                
-                for header, value in response.headers.items():
-                    if header.lower() not in excluded_response_headers:
-                        response_headers[header] = value
-                
-                # Add custom response headers
-                for key, values in query_params.items():
-                    if key.startswith('response_header[') and key.endswith(']'):
-                        header_name = key[16:-1]  # Remove 'response_header[' and ']'
-                        response_headers[header_name] = values[0]
-                
-                # Stream response data directly
-                self.log_message("Streaming response directly")
-                content_chunks = []
-                bytes_transferred = 0
-                
-                try:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            content_chunks.append(chunk)
-                            bytes_transferred += len(chunk)
-                
-                    content = b''.join(content_chunks)
-                    self.log_message(f"Streamed {bytes_transferred} bytes successfully")
-                    
-                    return web.Response(
-                        body=content,
-                        status=response.status_code,
-                        headers=response_headers
-                    )
-                        
-                except Exception as stream_error:
-                    self.log_message(f"Streaming error: {stream_error}")
-                    return self.send_error_response(502, f"Streaming error: {str(stream_error)}")
-                
-            except requests.exceptions.RequestException as e:
-                self.log_message(f"Request error: {e}")
-                return self.send_error_response(502, f"Bad Gateway: {str(e)}")
-                    
-            except OSError as e:
-                self.log_message(f"OS error: {e}")
-                return self.send_error_response(500, "Internal server error")
+            # Prepare data for the synchronous function
+            request_data = {
+                'client_ip': client_ip,
+                'method': method,
+                'query_params': query_params,
+                'headers': headers,
+                'body': body,
+                'target_url': target_url
+            }
             
-            finally:
-                # Always close the session to prevent connection pooling issues
-                session.close()
+            # Run the synchronous proxy request in a thread executor
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, 
+                sync_proxy_request, 
+                self.proxy_instance, 
+                request_data
+            )
+            
+            if result['success']:
+                return web.Response(
+                    body=result['content'],
+                    status=result['status'],
+                    headers=result['headers']
+                )
+            else:
+                return self.send_error_response(result['status'], result['error'])
             
         except Exception as e:
             self.log_message(f"Proxy error: {e}")
@@ -606,10 +622,6 @@ class HomieProxyView(HomeAssistantView):
         """Handle HEAD request."""
         return await self.handler.handle_request(request, "HEAD")
 
-    async def options(self, request: Request) -> web.Response:
-        """Handle OPTIONS request."""
-        return await self.handler.handle_request(request, "OPTIONS")
-
 
 class HomieProxyDebugView(HomeAssistantView):
     """Debug view for HomieProxy showing all instances and configuration."""
@@ -641,7 +653,7 @@ class HomieProxyDebugView(HomeAssistantView):
             "private_cidrs": PRIVATE_CIDRS,
             "local_cidrs": LOCAL_CIDRS,
             "available_restrictions": ["any", "external", "internal", "custom"],
-            "proxy_implementation": "standalone_proxy_code"
+            "proxy_implementation": "standalone_proxy_code_with_thread_executor"
         }
         
         # Format as pretty JSON

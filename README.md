@@ -1,20 +1,18 @@
 # Modern Python Reverse Proxy
 
-A clean, modern Python reverse proxy server with minimal dependencies that supports configurable instances, authentication, IP restrictions, caching, and programmable request/response handling.
+A clean, modern Python reverse proxy server with minimal dependencies that supports configurable instances, authentication, IP restrictions, and programmable request/response handling.
 
 ## Features
 
 - **Multiple Proxy Instances**: Configure multiple named proxy instances with different settings
-- **Concurrent Connections**: Multi-threaded server supports simultaneous requests
+- **Concurrent Connections**: Multi-threaded server supports simultaneous requests without blocking
 - **IP Access Control**: Restrict access to local/external networks or specific CIDR ranges
 - **Token Authentication**: Secure your proxy instances with custom tokens
-- **Rate Limiting**: Per-IP rate limiting to prevent abuse
-- **Persistent Disk Caching**: SHA1-based disk caching with size limits and TTL
-- **Per-Request Caching**: Enable caching on individual requests with `&cache=true`
 - **TLS Bypass**: Option to skip TLS certificate verification
 - **Custom Headers**: Add custom request and response headers
 - **Redirect Following**: Control whether HTTP redirects are followed
 - **All HTTP Methods**: Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
+- **Video/Large File Streaming**: Efficient streaming of large files without blocking other requests
 - **Minimal Dependencies**: Only requires the `requests` library
 
 ## Installation
@@ -36,33 +34,20 @@ The proxy server is configured via `proxy_config.json`. Here's the configuration
 
 ```json
 {
-  "clear_cache_on_start": false,
   "instances": {
     "default": {
       "access_mode": "both",
       "tokens": ["your-secret-token-here"],
-      "cache_enabled": true,
-      "cache_ttl": 3600,
-      "cache_max_size_mb": 0,
-      "rate_limit": 100,
       "allowed_cidrs": []
     },
     "internal": {
       "access_mode": "local",
       "tokens": [],
-      "cache_enabled": false,
-      "cache_ttl": 0,
-      "cache_max_size_mb": 0,
-      "rate_limit": 0,
       "allowed_cidrs": ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
     }
   }
 }
 ```
-
-#### Global Configuration Options
-
-- **clear_cache_on_start**: (boolean) If set to `true`, clears the entire cache directory when the server starts up. Useful for development and testing. Default: `false`
 
 #### Instance Configuration Options
 
@@ -72,14 +57,6 @@ The proxy server is configured via `proxy_config.json`. Here's the configuration
   - `"both"`: Allow all IP addresses (default)
 
 - **tokens**: Array of valid authentication tokens. If empty, no authentication required.
-
-- **cache_enabled**: Enable/disable persistent disk caching (default: false)
-
-- **cache_ttl**: Cache time-to-live in seconds (default: 3600)
-
-- **cache_max_size_mb**: Maximum cache size in MB (0 = unlimited, default: 0)
-
-- **rate_limit**: Maximum requests per minute per IP (0 = unlimited)
 
 - **allowed_cidrs**: Array of CIDR ranges to restrict access to specific networks
 
@@ -91,60 +68,21 @@ The proxy server is configured via `proxy_config.json`. Here's the configuration
     "public": {
       "access_mode": "both",
       "tokens": ["abc123", "def456"],
-      "cache_enabled": true,
-      "cache_ttl": 600,
-      "cache_max_size_mb": 0,
-      "rate_limit": 50,
       "allowed_cidrs": []
     },
     "internal": {
       "access_mode": "local",
       "tokens": [],
-      "cache_enabled": false,
-      "cache_ttl": 0,
-      "cache_max_size_mb": 0,
-      "rate_limit": 0,
       "allowed_cidrs": ["192.168.0.0/16", "10.0.0.0/8"]
     },
     "development": {
       "access_mode": "local",
       "tokens": [],
-      "cache_enabled": false,
-      "cache_ttl": 0,
-      "cache_max_size_mb": 0,
-      "rate_limit": 0,
       "allowed_cidrs": ["127.0.0.0/8"]
     }
   }
 }
 ```
-
-## Caching System
-
-The proxy features persistent disk caching with SHA1-based cache keys:
-
-### Disk Cache (SHA1-based)
-- Enabled per instance with `cache_enabled: true`
-- Activated per request with `&cache=true` parameter
-- Persistent across server restarts
-- SHA1 hash includes complete request signature:
-  - HTTP method
-  - Target URL
-  - All headers (sorted)
-  - Request body (if any)
-  - All query parameters (sorted)
-- Stored in `proxy_cache/` directory
-- Configurable TTL with `cache_ttl`
-- Configurable size limit with `cache_max_size_mb`
-
-### Cache Headers
-- `X-Cache: DISK` - Response served from disk cache
-- No header - Fresh response from target server
-
-### Cache Size Management
-- When cache size exceeds `cache_max_size_mb`, oldest files are automatically removed
-- Individual cache entries larger than the total limit are skipped
-- Requests are always served normally, even when caching is skipped due to size limits
 
 ## Usage
 
@@ -186,81 +124,17 @@ curl "http://localhost:8080/default?url=https://self-signed.example.com&token=yo
 curl "http://localhost:8080/default?url=https://self-signed.badssl.com&skip_tls_checks=all&token=your-secret-token-here"
 ```
 
-#### Caching Examples
-
-```bash
-# Enable disk caching for this request
-curl "http://localhost:8080/default?url=https://api.example.com/data&token=your-token&cache=true"
-
-# Second identical request will hit disk cache
-curl "http://localhost:8080/default?url=https://api.example.com/data&token=your-token&cache=true"
-
-# Different parameters create different cache entries
-curl "http://localhost:8080/default?url=https://api.example.com/data&token=your-token&cache=true&request_headers[User-Agent]=Bot1"
-curl "http://localhost:8080/default?url=https://api.example.com/data&token=your-token&cache=true&request_headers[User-Agent]=Bot2"
-
-# POST requests can also be cached
-curl -X POST -d '{"query": "data"}' \
-  "http://localhost:8080/default?url=https://api.example.com/search&token=your-token&cache=true"
-```
-
-#### Redirect Following Examples
-
-```bash
-# Default behavior - redirects are NOT followed (returns redirect response)
-curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token"
-
-# Enable redirect following to get final response
-curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token&follow_redirects=true"
-
-# Follow multiple redirects
-curl "http://localhost:8080/default?url=https://httpbin.org/redirect/3&token=your-token&follow_redirects=true"
-
-# Alternative parameter values (all equivalent to true)
-curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token&follow_redirects=1"
-curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token&follow_redirects=yes"
-
-# Explicit disable (same as default)
-curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token&follow_redirects=false"
-```
-
-#### Advanced Examples
-
-```bash
-# Add custom request headers
-curl "http://localhost:8080/default?url=https://httpbin.org/headers&token=your-secret-token-here&request_headers[User-Agent]=MyBot/1.0&request_headers[Referer]=https://example.com"
-
-# Add custom response headers (useful for CORS)
-curl "http://localhost:8080/default?url=https://httpbin.org/get&token=your-secret-token-here&response_header[Access-Control-Allow-Origin]=*&response_header[Access-Control-Allow-Methods]=GET,POST,PUT,DELETE"
-
-# Complex example with caching and custom headers
-curl "http://localhost:8080/default?url=https://api.example.com/data&token=your-secret-token-here&cache=true&skip_tls_checks=true&request_headers[Authorization]=Bearer%20xyz123&response_header[Access-Control-Allow-Origin]=*"
-```
-
-### URL Encoding
-
-Remember to URL-encode special characters in your parameters:
-
-```bash
-# Spaces become %20
-curl "http://localhost:8080/default?url=https://httpbin.org/get&request_headers[User-Agent]=My%20Custom%20Agent"
-
-# Equals signs become %3D
-curl "http://localhost:8080/default?url=https://httpbin.org/get&request_headers[Authorization]=Bearer%3Dtoken123"
-```
-
 ## Programmable Options
 
 ### Query Parameters
 
 - `url`: Target URL to proxy to (required)
 - `token`: Authentication token (required if tokens are configured)
-- `cache`: Set to `true` to enable disk caching for this request
-- `follow_redirects`: Set to `true` to follow HTTP redirects (default: `false`)
 - `skip_tls_checks`: Comma-separated list of TLS errors to ignore, or `all` to bypass all SSL verification
 - `request_headers[HeaderName]`: Add custom request headers
 - `response_header[HeaderName]`: Add custom response headers
-- `dns_server[]`: Custom DNS servers (placeholder for future implementation)
+- `dns_server[]`: Custom DNS servers for hostname resolution
+- `follow_redirects`: Enable/disable HTTP redirect following
 
 ### TLS Error Types
 
@@ -288,65 +162,58 @@ skip_tls_checks=self_signed
 skip_tls_checks=expired_cert,self_signed,cert_authority
 ```
 
-### Examples by Use Case
+### DNS Override
 
-#### Cached API Gateway
+The proxy supports custom DNS servers for hostname resolution, useful for bypassing DNS filtering or using specific DNS providers:
+
 ```bash
-curl "http://localhost:8080/default?url=https://api.example.com/expensive-operation&token=your-token&cache=true&response_header[Access-Control-Allow-Origin]=*"
+# Use Google DNS servers
+curl "http://localhost:8080/default?url=https://example.com&token=your-token&dns_server[]=8.8.8.8&dns_server[]=8.8.4.4"
+
+# Use Cloudflare DNS servers
+curl "http://localhost:8080/default?url=https://example.com&token=your-token&dns_server[]=1.1.1.1&dns_server[]=1.0.0.1"
+
+# Multiple DNS servers with fallback
+curl "http://localhost:8080/default?url=https://example.com&token=your-token&dns_server[]=9.9.9.9&dns_server[]=8.8.8.8&dns_server[]=1.1.1.1"
 ```
 
-#### Development Proxy with Granular TLS Control
+#### DNS Features:
+- **Multiple DNS servers**: Specify multiple servers for redundancy
+- **Automatic fallback**: If one DNS server fails, tries the next one
+- **Host header preservation**: Original hostname preserved for virtual hosting
+- **IP address caching**: Resolved IPs are used directly in requests
+- **Custom DNS logging**: Detailed logs show which DNS server resolved each hostname
+
+#### DNS Server Examples:
+- **Google DNS**: `8.8.8.8`, `8.8.4.4`
+- **Cloudflare DNS**: `1.1.1.1`, `1.0.0.1`
+- **OpenDNS**: `208.67.222.222`, `208.67.220.220`
+- **Quad9 DNS**: `9.9.9.9`, `149.112.112.112`
+
+## Concurrent Request Handling
+
+The reverse proxy uses `ThreadingHTTPServer` to handle multiple requests simultaneously:
+
+### Concurrency Features
+- **Multiple simultaneous connections**: Each request gets its own thread
+- **Non-blocking video/large file streaming**: Large downloads don't block other requests
+- **Thread-safe operations**: All operations are thread-safe
+
+### Performance Benefits
 ```bash
-curl "http://localhost:8080/internal?url=https://dev-api.local/data&cache=true&skip_tls_checks=self_signed,expired_cert"
+# These two large video files can download simultaneously
+# Request 1 (starts immediately):
+curl "http://localhost:8080/default?url=https://example.com/large-video.mp4&token=your-token&skip_tls_checks=all" &
+
+# Request 2 (also starts immediately, no waiting for Request 1):
+curl "http://localhost:8080/default?url=https://example.com/another-video.mp4&token=your-token&skip_tls_checks=all" &
 ```
 
-#### API Integration with Specific TLS Error Handling
-```bash
-curl -X POST -H "Content-Type: application/json" -d '{"query":"search"}' \
-  "http://localhost:8080/default?url=https://legacy-api.company.com/search&token=your-token&skip_tls_checks=weak_cipher,cert_authority"
-```
-
-## Cache Management
-
-### Cache Directory Structure
-```
-proxy_cache/
-├── a1b2c3d4e5f6...abc123.cache  # SHA1 hash of request
-├── f6e5d4c3b2a1...def456.cache
-└── ...
-```
-
-### Cache File Format
-Each cache file contains:
-- Response status code
-- Response headers
-- Response body
-- Expiration timestamp
-- Creation timestamp
-- Cache key (SHA1 hash)
-
-### Manual Cache Management
-```bash
-# View cache directory
-ls -la proxy_cache/
-
-# Clear all cache files
-rm -rf proxy_cache/*.cache
-
-# View cache file details (requires Python)
-python -c "import pickle; print(pickle.load(open('proxy_cache/HASH.cache', 'rb')))"
-```
-
-## Security Considerations
-
-1. **Token Security**: Use strong, random tokens for authentication
-2. **Network Restrictions**: Use `allowed_cidrs` to restrict access to trusted networks
-3. **Rate Limiting**: Configure appropriate rate limits to prevent abuse
-4. **TLS Verification**: Only disable TLS checks for development/internal services
-5. **Access Modes**: Use `local` mode for internal-only proxies
-6. **Cache Security**: Cache files contain response data - secure the cache directory
-7. **Disk Space**: Monitor cache directory size, especially with long TTLs
-8. **Header Filtering**: Proxy headers (`X-Forwarded-For`, `X-Real-IP`, etc.) are automatically filtered out before forwarding requests
+### Concurrent Use Cases
+- **Multiple video streams**: Stream different videos to different clients simultaneously
+- **API + Video**: Small API requests don't wait for large file downloads
+- **Batch processing**: Multiple data requests can run in parallel
+- **Mixed workloads**: JSON APIs, file downloads, and streaming can all happen concurrently
 
 ## Monitoring and Logging
 
@@ -356,9 +223,10 @@ The proxy provides detailed logging with timestamps:
 [2024-01-15 10:30:45] 192.168.1.100 - - [15/Jan/2024 10:30:45] "GET /default?url=https://httpbin.org/get HTTP/1.1" 200 -
 ```
 
-Cache statistics are shown on startup:
+Server startup shows loaded configuration:
 ```
-Disk cache: 42 files, 1048576 bytes
+Loaded 2 proxy instances
+Multi-threaded server - supports concurrent requests
 ```
 
 ## Error Responses
@@ -374,4 +242,8 @@ All errors are returned as JSON:
 ```
 
 Common error codes:
-- `
+- `400`: Bad Request (missing URL, invalid parameters)
+- `401`: Unauthorized (invalid or missing token)
+- `403`: Forbidden (IP access denied)
+- `404`: Not Found (instance not found)
+- `502`: Bad Gateway (target server error)

@@ -30,8 +30,6 @@ try:
     response = requests.get(url, timeout=10)
     print(f"✅ Status: {response.status_code}")
     print(f"📥 Content-Type: {response.headers.get('Content-Type', 'N/A')}")
-    cache_header = response.headers.get('X-Cache', 'NOT FOUND')
-    print(f"📥 X-Cache: {cache_header}")
     
     # Check the actual response
     try:
@@ -43,23 +41,21 @@ try:
 except Exception as e:
     print(f"❌ Error: {e}")
 
-# Test 3: Large file test (but smaller than before)
-print("\n🔸 Test 3: Smaller file test")
+# Test 3: Small file test
+print("\n🔸 Test 3: Small file test")
 try:
-    url = f"{base_url}&url=https://httpbin.org/bytes/1024&cache=true"  # 1KB instead of 1MB
+    url = f"{base_url}&url=https://httpbin.org/bytes/1024"  # 1KB
     print(f"URL: {url}")
     response = requests.get(url, timeout=10)
     print(f"✅ Status: {response.status_code}")
     print(f"📥 Content-Type: {response.headers.get('Content-Type', 'N/A')}")
     print(f"📥 Content-Length: {response.headers.get('Content-Length', 'N/A')}")
-    cache_header = response.headers.get('X-Cache', 'NOT FOUND')
-    print(f"📥 X-Cache: {cache_header}")
     print(f"📊 Actual size: {len(response.content)} bytes")
 except Exception as e:
     print(f"❌ Error: {e}")
 
 # Test 4: Test what happens with the problematic drip URL
-print("\n🔸 Test 4: Problematic drip URL test")
+print("\n🔸 Test 4: Drip URL test")
 try:
     url = f"{base_url}&url=https://httpbin.org/drip?numbytes=100&duration=1"  # Much smaller
     print(f"URL: {url}")

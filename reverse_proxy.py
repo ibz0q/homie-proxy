@@ -9,17 +9,13 @@ import ipaddress
 import socket
 import ssl
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, List, Optional, Any
-import hashlib
+from typing import Dict, List, Optional
 import time
 import threading
 import os
-import pickle
-import warnings
 import subprocess
-import shutil
 
 try:
     import requests
@@ -90,226 +86,6 @@ class CustomHTTPSAdapter(HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 
-class DiskCache:
-    """Disk-based cache with SHA1 hashing and TTL support"""
-    
-    def __init__(self, cache_dir: str = "cache"):
-        self.cache_dir = cache_dir
-        self.lock = threading.Lock()
-        
-        # Create cache directory if it doesn't exist
-        if not os.path.exists(cache_dir):
-            os.makedirs(cache_dir)
-    
-    def _get_cache_path(self, key: str) -> str:
-        """Get the file path for a cache key"""
-        return os.path.join(self.cache_dir, f"{key}.cache")
-    
-    def _create_cache_key(self, method: str, url: str, headers: Dict, body: bytes, query_params: Dict) -> str:
-        """Create a SHA1 hash of the complete request"""
-        # Create a comprehensive request signature
-        request_data = {
-            'method': method,
-            'url': url,
-            'headers': dict(sorted(headers.items())),
-            'body': body.hex() if body else '',
-            'query_params': dict(sorted(query_params.items()))
-        }
-        
-        # Convert to JSON string for consistent hashing
-        request_string = json.dumps(request_data, sort_keys=True)
-        
-        # Create SHA1 hash
-        return hashlib.sha1(request_string.encode()).hexdigest()
-    
-    def _get_total_cache_size(self) -> int:
-        """Get the total size of all cache files in bytes"""
-        total_size = 0
-        try:
-            for filename in os.listdir(self.cache_dir):
-                if filename.endswith('.cache'):
-                    cache_path = os.path.join(self.cache_dir, filename)
-                    try:
-                        total_size += os.path.getsize(cache_path)
-                    except OSError:
-                        # File might have been deleted, skip it
-                        pass
-        except OSError:
-            # Directory might not exist or be accessible
-            pass
-        return total_size
-    
-    def _cleanup_oldest_files(self, target_size: int):
-        """Remove oldest cache files until total size is under target_size"""
-        try:
-            # Get all cache files with their modification times
-            cache_files = []
-            for filename in os.listdir(self.cache_dir):
-                if filename.endswith('.cache'):
-                    cache_path = os.path.join(self.cache_dir, filename)
-                    try:
-                        mtime = os.path.getmtime(cache_path)
-                        size = os.path.getsize(cache_path)
-                        cache_files.append((cache_path, mtime, size))
-                    except OSError:
-                        pass
-            
-            # Sort by modification time (oldest first)
-            cache_files.sort(key=lambda x: x[1])
-            
-            current_size = sum(f[2] for f in cache_files)
-            
-            # Remove oldest files until we're under the target size
-            for cache_path, mtime, size in cache_files:
-                if current_size <= target_size:
-                    break
-                try:
-                    os.remove(cache_path)
-                    current_size -= size
-                except OSError:
-                    pass
-                    
-        except Exception as e:
-            print(f"Warning: Error during cache cleanup: {e}")
-    
-    def get(self, method: str, url: str, headers: Dict, body: bytes, query_params: Dict) -> Optional[Any]:
-        """Get cached response if it exists and is not expired"""
-        cache_key = self._create_cache_key(method, url, headers, body, query_params)
-        cache_path = self._get_cache_path(cache_key)
-        
-        with self.lock:
-            try:
-                if os.path.exists(cache_path):
-                    with open(cache_path, 'rb') as f:
-                        cache_entry = pickle.load(f)
-                    
-                    # Check if cache entry is still valid
-                    if datetime.now() < cache_entry['expires']:
-                        return cache_entry['data']
-                    else:
-                        # Remove expired cache file
-                        os.remove(cache_path)
-                        
-            except (FileNotFoundError, pickle.PickleError, KeyError):
-                # Cache file corrupted or missing
-                if os.path.exists(cache_path):
-                    try:
-                        os.remove(cache_path)
-                    except:
-                        pass
-                        
-        return None
-    
-    def set(self, method: str, url: str, headers: Dict, body: bytes, query_params: Dict, 
-            data: Any, ttl_seconds: int, max_cache_size_mb: int = 0):
-        """Store response in cache if size limits allow"""
-        cache_key = self._create_cache_key(method, url, headers, body, query_params)
-        cache_path = self._get_cache_path(cache_key)
-        
-        cache_entry = {
-            'data': data,
-            'expires': datetime.now() + timedelta(seconds=ttl_seconds),
-            'created': datetime.now(),
-            'cache_key': cache_key
-        }
-        
-        with self.lock:
-            try:
-                # Check cache size limit if configured
-                if max_cache_size_mb > 0:
-                    max_cache_size_bytes = max_cache_size_mb * 1024 * 1024
-                    
-                    # Estimate the size of the new cache entry
-                    temp_data = pickle.dumps(cache_entry)
-                    new_entry_size = len(temp_data)
-                    
-                    current_cache_size = self._get_total_cache_size()
-                    
-                    # If adding this entry would exceed the limit, check if we can make room
-                    if current_cache_size + new_entry_size > max_cache_size_bytes:
-                        # Try to cleanup old files to make room
-                        target_size = max_cache_size_bytes - new_entry_size
-                        if target_size > 0:
-                            self._cleanup_oldest_files(target_size)
-                            
-                            # Check if we now have enough space
-                            current_cache_size = self._get_total_cache_size()
-                            if current_cache_size + new_entry_size > max_cache_size_bytes:
-                                # Still not enough space, skip caching
-                                print(f"Warning: Cache size limit ({max_cache_size_mb}MB) exceeded, skipping cache for {cache_key[:8]}...")
-                                return
-                        else:
-                            # New entry is larger than the entire cache limit
-                            print(f"Warning: Cache entry too large ({new_entry_size} bytes), skipping cache for {cache_key[:8]}...")
-                            return
-                
-                # Write the cache file
-                with open(cache_path, 'wb') as f:
-                    pickle.dump(cache_entry, f)
-                    
-            except Exception as e:
-                print(f"Warning: Failed to write cache file {cache_path}: {e}")
-    
-    def clear_expired(self):
-        """Remove expired cache files"""
-        with self.lock:
-            try:
-                for filename in os.listdir(self.cache_dir):
-                    if filename.endswith('.cache'):
-                        cache_path = os.path.join(self.cache_dir, filename)
-                        try:
-                            with open(cache_path, 'rb') as f:
-                                cache_entry = pickle.load(f)
-                            
-                            if datetime.now() >= cache_entry['expires']:
-                                os.remove(cache_path)
-                                
-                        except (pickle.PickleError, KeyError, FileNotFoundError):
-                            # Remove corrupted cache files
-                            try:
-                                os.remove(cache_path)
-                            except:
-                                pass
-                                
-            except Exception as e:
-                print(f"Warning: Error during cache cleanup: {e}")
-    
-    def get_cache_stats(self) -> Dict:
-        """Get cache statistics"""
-        stats = {
-            'total_files': 0,
-            'total_size_bytes': 0,
-            'total_size_mb': 0.0,
-            'expired_files': 0
-        }
-        
-        try:
-            now = datetime.now()
-            for filename in os.listdir(self.cache_dir):
-                if filename.endswith('.cache'):
-                    cache_path = os.path.join(self.cache_dir, filename)
-                    try:
-                        stats['total_files'] += 1
-                        file_size = os.path.getsize(cache_path)
-                        stats['total_size_bytes'] += file_size
-                        
-                        with open(cache_path, 'rb') as f:
-                            cache_entry = pickle.load(f)
-                        
-                        if now >= cache_entry['expires']:
-                            stats['expired_files'] += 1
-                            
-                    except:
-                        stats['expired_files'] += 1
-                        
-            stats['total_size_mb'] = round(stats['total_size_bytes'] / (1024 * 1024), 2)
-                        
-        except Exception:
-            pass
-            
-        return stats
-
-
 class ProxyInstance:
     """Configuration for a proxy instance"""
     
@@ -317,15 +93,7 @@ class ProxyInstance:
         self.name = name
         self.access_mode = config.get('access_mode', 'both')  # local, external, both
         self.tokens = set(config.get('tokens', []))
-        self.cache_enabled = config.get('cache_enabled', False)
-        self.cache_ttl = config.get('cache_ttl', 3600)  # 1 hour default (was disk_cache_ttl)
-        self.cache_max_size_mb = config.get('cache_max_size_mb', 0)  # 0 = unlimited (was disk_cache_max_size_mb)
-        self.rate_limit = config.get('rate_limit', 100)  # requests per minute
         self.allowed_cidrs = [ipaddress.ip_network(cidr) for cidr in config.get('allowed_cidrs', [])]
-        
-        # Rate limiting
-        self.request_counts: Dict[str, List[float]] = {}
-        self.rate_lock = threading.Lock()
     
     def is_access_allowed(self, client_ip: str) -> bool:
         """Check if access is allowed based on IP and access mode"""
@@ -354,40 +122,13 @@ class ProxyInstance:
         if not self.tokens:
             return True  # No tokens required
         return token in self.tokens
-    
-    def check_rate_limit(self, client_ip: str) -> bool:
-        """Check if client is within rate limits"""
-        if self.rate_limit <= 0:
-            return True
-            
-        with self.rate_lock:
-            now = time.time()
-            minute_ago = now - 60
-            
-            if client_ip not in self.request_counts:
-                self.request_counts[client_ip] = []
-            
-            # Remove old requests
-            self.request_counts[client_ip] = [
-                req_time for req_time in self.request_counts[client_ip] 
-                if req_time > minute_ago
-            ]
-            
-            # Check limit
-            if len(self.request_counts[client_ip]) >= self.rate_limit:
-                return False
-            
-            # Add current request
-            self.request_counts[client_ip].append(now)
-            return True
 
 
 class ReverseProxyHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the reverse proxy"""
     
-    def __init__(self, *args, proxy_config=None, disk_cache=None, **kwargs):
+    def __init__(self, *args, proxy_config=None, **kwargs):
         self.proxy_config = proxy_config or {}
-        self.disk_cache = disk_cache or DiskCache()
         super().__init__(*args, **kwargs)
     
     def log_message(self, format, *args):
@@ -409,29 +150,14 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             # Log unexpected errors but don't crash
             self.log_message(f"Request handling error: {e}")
     
-    def do_GET(self):
-        self.handle_request('GET')
+    def __getattr__(self, name):
+        """Handle all HTTP methods generically"""
+        if name.startswith('do_'):
+            return self.handle_request
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
     
-    def do_POST(self):
-        self.handle_request('POST')
-    
-    def do_PUT(self):
-        self.handle_request('PUT')
-    
-    def do_DELETE(self):
-        self.handle_request('DELETE')
-    
-    def do_PATCH(self):
-        self.handle_request('PATCH')
-    
-    def do_HEAD(self):
-        self.handle_request('HEAD')
-    
-    def do_OPTIONS(self):
-        self.handle_request('OPTIONS')
-    
-    def handle_request(self, method: str):
-        """Main request handler"""
+    def handle_request(self):
+        """Main request handler - uses self.command for HTTP method"""
         try:
             # Parse the request path
             path_parts = self.path.lstrip('/').split('?', 1)
@@ -454,11 +180,6 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 self.send_error_response(403, "Access denied from your IP")
                 return
             
-            # Check rate limiting
-            if not instance.check_rate_limit(client_ip):
-                self.send_error_response(429, "Rate limit exceeded")
-                return
-            
             # Parse query parameters
             query_params = {}
             if len(path_parts) > 1:
@@ -479,108 +200,63 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 self.send_error_response(401, "Invalid or missing token")
                 return
             
-            # Handle the proxy request
-            self.proxy_request(method, target_url, query_params, instance)
-            
-        except Exception as e:
-            self.log_message(f"Error handling request: {e}")
-            self.send_error_response(500, "Internal server error")
-    
-    def get_client_ip(self) -> str:
-        """Get the real client IP address"""
-        # Check for forwarded headers first
-        forwarded_for = self.headers.get('X-Forwarded-For')
-        if forwarded_for:
-            return forwarded_for.split(',')[0].strip()
-        
-        real_ip = self.headers.get('X-Real-IP')
-        if real_ip:
-            return real_ip
-        
-        return self.client_address[0]
-    
-    def proxy_request(self, method: str, target_url: str, query_params: Dict, instance: ProxyInstance):
-        """Proxy the request to the target URL"""
-        try:
-            # Get request body for all methods that might have a body
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = None
-            if content_length > 0:
-                body = self.rfile.read(content_length)
-            elif method in ['POST', 'PUT', 'PATCH']:
-                # Some clients might send body without Content-Length
-                try:
-                    # Try to read any available data (non-blocking)
-                    import select
-                    if select.select([self.rfile], [], [], 0)[0]:
-                        body = self.rfile.read()
-                except:
-                    pass
-            
-            # Prepare headers for caching (remove proxy-specific headers)
-            cache_headers = dict(self.headers)
-            hop_by_hop = ['connection', 'keep-alive', 'proxy-authenticate', 
-                         'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']
-            proxy_headers = ['x-forwarded-for', 'x-real-ip', 'x-forwarded-proto', 'x-forwarded-host',
-                           'x-forwarded-port', 'x-forwarded-server', 'x-client-ip', 'x-originating-ip',
-                           'x-remote-ip', 'x-remote-addr', 'cf-connecting-ip', 'true-client-ip',
-                           'x-cluster-client-ip', 'fastly-client-ip', 'x-azure-clientip']
-            
-            for header in hop_by_hop + proxy_headers:
-                cache_headers.pop(header, None)
-                cache_headers.pop(header.lower(), None)  # Ensure case-insensitive removal
-            
-            # Check if caching is requested for this specific request
-            cache_requested = query_params.get('cache', ['false'])[0].lower() == 'true'
-            use_disk_cache = cache_requested and instance.cache_enabled
-            
-            # Check disk cache first (if enabled for this request)
-            if use_disk_cache:
-                cached_response = self.disk_cache.get(method, target_url, cache_headers, body or b'', query_params)
-                if cached_response:
-                    self.send_cached_response(cached_response, cache_type='DISK')
-                    return
-            
-            # Prepare request session
-            session = requests.Session()
-            
-            # Clear any default User-Agent from the session
-            session.headers.pop('User-Agent', None)
-            
-            # Configure TLS error handling
-            skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
-            if skip_tls_checks_param[0]:
-                skip_tls_value = skip_tls_checks_param[0].lower()
-                
-                # Handle boolean-style values (true/false) and convert to 'all'
-                if skip_tls_value in ['true', '1', 'yes']:
-                    skip_tls_checks = ['all']
-                    self.log_message("TLS parameter 'true' detected, ignoring ALL TLS errors")
-                else:
-                    # Parse comma-separated list of TLS errors to ignore
-                    skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
-                
-                # Check for ALL option - completely disable TLS verification
-                if 'all' in skip_tls_checks:
-                    session.verify = False
-                    urllib3.disable_warnings(InsecureRequestWarning)
-                    if SubjectAltNameWarning is not None:
-                        urllib3.disable_warnings(SubjectAltNameWarning)
-                    if InsecurePlatformWarning is not None:
-                        urllib3.disable_warnings(InsecurePlatformWarning)
-                    self.log_message("Ignoring ALL TLS errors - complete TLS verification disabled")
-                else:
-                    # Mount custom HTTPS adapter for specific error types
-                    https_adapter = CustomHTTPSAdapter(skip_tls_checks=skip_tls_checks)
-                    session.mount('https://', https_adapter)
-                    self.log_message(f"Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
-            
-            # Configure DNS servers (basic implementation)
+            # Configure DNS servers and resolve hostname if needed
             dns_servers = query_params.get('dns_server[]', [])
+            original_target_url = target_url
+            
             if dns_servers:
-                # Note: Python's requests doesn't directly support custom DNS
-                # This would require additional libraries like dnspython
-                pass
+                self.log_message(f"Custom DNS servers specified: {', '.join(dns_servers)}")
+                
+                # Parse the target URL to extract hostname
+                from urllib.parse import urlparse, urlunparse
+                parsed_url = urlparse(target_url)
+                
+                if parsed_url.hostname:
+                    # Resolve hostname using custom DNS servers
+                    resolved_ip = self.resolve_hostname_with_dns(parsed_url.hostname, dns_servers)
+                    
+                    # If resolution successful and different from original, update URL
+                    if resolved_ip != parsed_url.hostname:
+                        # Replace hostname with resolved IP in the URL
+                        netloc = resolved_ip
+                        if parsed_url.port:
+                            netloc += f":{parsed_url.port}"
+                        
+                        # Reconstruct URL with IP address
+                        modified_url = urlunparse((
+                            parsed_url.scheme,
+                            netloc,
+                            parsed_url.path,
+                            parsed_url.params,
+                            parsed_url.query,
+                            parsed_url.fragment
+                        ))
+                        
+                        target_url = modified_url
+                        self.log_message(f"Modified target URL: {original_target_url} -> {target_url}")
+                        
+                        # Ensure Host header still contains original hostname for virtual hosting
+                        headers['Host'] = parsed_url.hostname
+                        if parsed_url.port and parsed_url.port not in [80, 443]:
+                            headers['Host'] += f":{parsed_url.port}"
+                        self.log_message(f"Set Host header to original hostname: {headers['Host']}")
+                else:
+                    self.log_message("No hostname found in target URL for DNS resolution")
+            else:
+                # Fix Host header normally when no custom DNS is used
+                from urllib.parse import urlparse
+                parsed_target = urlparse(target_url)
+                if parsed_target.hostname:
+                    # Check if the hostname is an IP address
+                    try:
+                        ipaddress.ip_address(parsed_target.hostname)
+                        # It's an IP address - set Host header to the IP (some servers expect this)
+                        headers['Host'] = parsed_target.hostname
+                        self.log_message(f"Fixed Host header to IP: {headers['Host']}")
+                    except ValueError:
+                        # It's a hostname - always use just the hostname (no port for virtual hosts)
+                        headers['Host'] = parsed_target.hostname
+                        self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
             
             # Configure redirect following
             follow_redirects_param = query_params.get('follow_redirects', ['false'])
@@ -594,6 +270,13 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             headers = dict(self.headers)
             
             # Remove hop-by-hop headers and proxy-specific headers
+            hop_by_hop = ['connection', 'keep-alive', 'proxy-authenticate', 
+                         'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']
+            proxy_headers = ['x-forwarded-for', 'x-real-ip', 'x-forwarded-proto', 'x-forwarded-host',
+                           'x-forwarded-port', 'x-forwarded-server', 'x-client-ip', 'x-originating-ip',
+                           'x-remote-ip', 'x-remote-addr', 'cf-connecting-ip', 'true-client-ip',
+                           'x-cluster-client-ip', 'fastly-client-ip', 'x-azure-clientip']
+            
             for header in hop_by_hop + proxy_headers:
                 headers.pop(header, None)
                 headers.pop(header.lower(), None)  # Ensure case-insensitive removal
@@ -603,21 +286,6 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 if key.startswith('request_headers[') and key.endswith(']'):
                     header_name = key[16:-1]  # Remove 'request_headers[' and ']'
                     headers[header_name] = values[0]
-            
-            # Fix Host header to match target URL hostname (for virtual hosts)
-            from urllib.parse import urlparse
-            parsed_target = urlparse(target_url)
-            if parsed_target.hostname:
-                # Check if the hostname is an IP address
-                try:
-                    ipaddress.ip_address(parsed_target.hostname)
-                    # It's an IP address - set Host header to the IP (some servers expect this)
-                    headers['Host'] = parsed_target.hostname
-                    self.log_message(f"Fixed Host header to IP: {headers['Host']}")
-                except ValueError:
-                    # It's a hostname - always use just the hostname (no port for virtual hosts)
-                    headers['Host'] = parsed_target.hostname
-                    self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
             
             # Always ensure User-Agent is explicitly set (use blank if none provided)
             user_agent_set = False
@@ -715,89 +383,16 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             
             self.end_headers()
             
-            # Determine if response should be cached based on size and content type
-            content_length = response.headers.get('Content-Length')
-            content_type = response.headers.get('Content-Type', '').lower()
+            # Stream response data directly (no caching)
+            self.log_message("Streaming response directly")
+            bytes_transferred = 0
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    self.wfile.write(chunk)
+                    bytes_transferred += len(chunk)
             
-            # Define cache size limit (default 10MB) and streaming content types
-            max_cache_size = 10 * 1024 * 1024  # 10MB
-            always_streaming_content_types = [
-                'video/', 'audio/',  # Always stream video and audio
-                'application/zip', 'application/x-tar', 'application/gzip',  # Archives
-            ]
-            large_file_content_types = [
-                'application/octet-stream',  # Stream only if large
-                'image/gif', 'image/png', 'image/jpeg'  # Stream large images only
-            ]
-            
-            should_cache = use_disk_cache and response.status_code == 200
-            is_large_content = False
-            is_always_streaming = any(content_type.startswith(ct) for ct in always_streaming_content_types)
-            is_large_file_type = any(content_type.startswith(ct) for ct in large_file_content_types)
-            
-            # Check content size
-            if content_length:
-                try:
-                    size = int(content_length)
-                    if size > max_cache_size:
-                        is_large_content = True
-                        should_cache = False
-                        self.log_message(f"Large content ({size} bytes), streaming without caching")
-                except:
-                    pass
-            
-            # Always stream video/audio regardless of size
-            if is_always_streaming:
-                should_cache = False
-                self.log_message(f"Streaming content type ({content_type}), streaming without caching")
-            # Stream large file types only if they're actually large or unknown size
-            elif is_large_file_type and (is_large_content or not content_length):
-                should_cache = False
-                self.log_message(f"Large file type ({content_type}), streaming without caching")
-            
-            # Stream response data
-            if should_cache and not is_large_content and not is_always_streaming:
-                # Cache small responses
-                response_data = b''
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        self.wfile.write(chunk)
-                        response_data += chunk
-                        
-                        # Safety check: if response grows too large, stop caching
-                        if len(response_data) > max_cache_size:
-                            self.log_message(f"Response exceeded cache size limit, continuing stream without caching")
-                            # Continue streaming remaining chunks without caching
-                            for remaining_chunk in response.iter_content(chunk_size=8192):
-                                if remaining_chunk:
-                                    self.wfile.write(remaining_chunk)
-                            should_cache = False
-                            break
-                
-                # Cache the response if it was small enough
-                if should_cache and len(response_data) <= max_cache_size:
-                    cached_response = {
-                        'status_code': response.status_code,
-                        'headers': dict(response.headers),
-                        'content': response_data
-                    }
-                    
-                    self.disk_cache.set(
-                        method, target_url, cache_headers, body or b'', query_params,
-                        cached_response, instance.cache_ttl, instance.cache_max_size_mb
-                    )
-                    self.log_message(f"Cached response ({len(response_data)} bytes)")
-            else:
-                # Stream large files directly without buffering in memory
-                self.log_message("Streaming response directly (no caching)")
-                bytes_transferred = 0
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        self.wfile.write(chunk)
-                        bytes_transferred += len(chunk)
-                
-                if bytes_transferred > 0:
-                    self.log_message(f"Streamed {bytes_transferred} bytes")
+            if bytes_transferred > 0:
+                self.log_message(f"Streamed {bytes_transferred} bytes")
             
         except requests.exceptions.RequestException as e:
             self.log_message(f"Request error: {e}")
@@ -805,15 +400,6 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.log_message(f"Proxy error: {e}")
             self.send_error_response(500, "Internal server error")
-    
-    def send_cached_response(self, cached_response: Dict, cache_type: str = 'HIT'):
-        """Send a cached response"""
-        self.send_response(cached_response['status_code'])
-        for header, value in cached_response['headers'].items():
-            self.send_header(header, value)
-        self.send_header('X-Cache', cache_type)
-        self.end_headers()
-        self.wfile.write(cached_response['content'])
     
     def send_error_response(self, code: int, message: str):
         """Send an error response"""
@@ -827,6 +413,240 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
         })
         self.wfile.write(error_response.encode())
 
+    def resolve_hostname_with_dns(self, hostname: str, dns_servers: List[str]) -> str:
+        """Resolve hostname using custom DNS servers"""
+        if not dns_servers:
+            return hostname
+        
+        # Check if hostname is already an IP address
+        try:
+            ipaddress.ip_address(hostname)
+            self.log_message(f"Hostname {hostname} is already an IP address")
+            return hostname
+        except ValueError:
+            pass
+        
+        self.log_message(f"Resolving {hostname} using custom DNS servers: {', '.join(dns_servers)}")
+        
+        # Try each DNS server until one works
+        for dns_server in dns_servers:
+            try:
+                resolved_ip = self._query_dns_server(hostname, dns_server)
+                if resolved_ip:
+                    self.log_message(f"Successfully resolved {hostname} to {resolved_ip} via {dns_server}")
+                    return resolved_ip
+            except Exception as e:
+                self.log_message(f"DNS resolution failed using {dns_server}: {e}")
+                continue
+        
+        # If all DNS servers fail, return original hostname
+        self.log_message(f"DNS resolution failed for {hostname}, using original hostname")
+        return hostname
+    
+    def _query_dns_server(self, hostname: str, dns_server: str) -> Optional[str]:
+        """Send a DNS query to a specific DNS server"""
+        import socket
+        import struct
+        import random
+        
+        try:
+            # Create DNS query packet
+            transaction_id = random.randint(0, 65535)
+            
+            # DNS header (12 bytes)
+            header = struct.pack('!HHHHHH', transaction_id, 0x0100, 1, 0, 0, 0)
+            
+            # DNS question section
+            question = b''
+            
+            # Convert hostname to DNS format
+            parts = hostname.split('.')
+            for part in parts:
+                question += struct.pack('!B', len(part)) + part.encode('ascii')
+            question += b'\x00'  # End of name
+            
+            # Question type (A record = 1) and class (IN = 1)
+            question += struct.pack('!HH', 1, 1)
+            
+            # Complete DNS query
+            query = header + question
+            
+            # Send UDP query to DNS server
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(5)  # 5 second timeout
+            
+            sock.sendto(query, (dns_server, 53))
+            response, _ = sock.recvfrom(512)
+            sock.close()
+            
+            # Parse DNS response
+            if len(response) < 12:
+                return None
+            
+            # Check if response is valid
+            response_id = struct.unpack('!H', response[0:2])[0]
+            if response_id != transaction_id:
+                return None
+            
+            # Check response flags
+            flags = struct.unpack('!H', response[2:4])[0]
+            if (flags & 0x8000) == 0:  # Not a response
+                return None
+            if (flags & 0x000F) != 0:  # Error in response
+                return None
+            
+            # Get number of answers
+            answers = struct.unpack('!H', response[6:8])[0]
+            if answers == 0:
+                return None
+            
+            # Skip question section
+            offset = 12
+            while offset < len(response) and response[offset] != 0:
+                length = response[offset]
+                if length & 0xC0:  # Compression pointer
+                    offset += 2
+                    break
+                else:
+                    offset += length + 1
+            if offset < len(response) and response[offset] == 0:
+                offset += 1
+            offset += 4  # Skip QTYPE and QCLASS
+            
+            # Parse answer section
+            while answers > 0 and offset < len(response):
+                # Skip name (can be compressed)
+                if response[offset] & 0xC0:  # Compression pointer
+                    offset += 2
+                else:
+                    while offset < len(response) and response[offset] != 0:
+                        offset += response[offset] + 1
+                    if offset < len(response):
+                        offset += 1
+                
+                if offset + 10 > len(response):
+                    break
+                
+                # Read type, class, TTL, data length
+                record_type, record_class, ttl, data_length = struct.unpack('!HHIH', response[offset:offset+10])
+                offset += 10
+                
+                # If it's an A record (type 1), extract IP address
+                if record_type == 1 and data_length == 4:
+                    ip_bytes = response[offset:offset+4]
+                    ip_address = '.'.join(str(b) for b in ip_bytes)
+                    return ip_address
+                
+                offset += data_length
+                answers -= 1
+            
+            return None
+            
+        except Exception as e:
+            self.log_message(f"Error querying DNS server {dns_server}: {e}")
+            return None
+
+    def get_client_ip(self) -> str:
+        """Get the real client IP address"""
+        # Check for forwarded headers first
+        forwarded_for = self.headers.get('X-Forwarded-For')
+        if forwarded_for:
+            return forwarded_for.split(',')[0].strip()
+        
+        real_ip = self.headers.get('X-Real-IP')
+        if real_ip:
+            return real_ip
+        
+        return self.client_address[0]
+    
+    def proxy_request(self, method: str, target_url: str, query_params: Dict, instance: ProxyInstance):
+        """Proxy the request to the target URL"""
+        try:
+            # Get request body for all methods that might have a body
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = None
+            if content_length > 0:
+                body = self.rfile.read(content_length)
+            elif method in ['POST', 'PUT', 'PATCH']:
+                # Some clients might send body without Content-Length
+                try:
+                    # Try to read any available data (non-blocking)
+                    import select
+                    if select.select([self.rfile], [], [], 0)[0]:
+                        body = self.rfile.read()
+                except:
+                    pass
+            
+            # Prepare request session
+            session = requests.Session()
+            
+            # Clear any default User-Agent from the session
+            session.headers.pop('User-Agent', None)
+            
+            # Configure TLS error handling
+            skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
+            if skip_tls_checks_param[0]:
+                skip_tls_value = skip_tls_checks_param[0].lower()
+                
+                # Handle boolean-style values (true/false) and convert to 'all'
+                if skip_tls_value in ['true', '1', 'yes']:
+                    skip_tls_checks = ['all']
+                    self.log_message("TLS parameter 'true' detected, ignoring ALL TLS errors")
+                else:
+                    # Parse comma-separated list of TLS errors to ignore
+                    skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
+                
+                # Check for ALL option - completely disable TLS verification
+                if 'all' in skip_tls_checks:
+                    session.verify = False
+                    urllib3.disable_warnings(InsecureRequestWarning)
+                    if SubjectAltNameWarning is not None:
+                        urllib3.disable_warnings(SubjectAltNameWarning)
+                    if InsecurePlatformWarning is not None:
+                        urllib3.disable_warnings(InsecurePlatformWarning)
+                    self.log_message("Ignoring ALL TLS errors - complete TLS verification disabled")
+                else:
+                    # Mount custom HTTPS adapter for specific error types
+                    https_adapter = CustomHTTPSAdapter(skip_tls_checks=skip_tls_checks)
+                    session.mount('https://', https_adapter)
+                    self.log_message(f"Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
+            
+            # Configure redirect following
+            follow_redirects_param = query_params.get('follow_redirects', ['false'])
+            follow_redirects = follow_redirects_param[0].lower() in ['true', '1', 'yes']
+            if follow_redirects:
+                self.log_message("Redirect following enabled")
+            else:
+                self.log_message("Redirect following disabled (default)")
+            
+            # Prepare headers
+            headers = dict(self.headers)
+            
+            # Remove hop-by-hop headers and proxy-specific headers
+            hop_by_hop = ['connection', 'keep-alive', 'proxy-authenticate', 
+                         'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']
+            proxy_headers = ['x-forwarded-for', 'x-real-ip', 'x-forwarded-proto', 'x-forwarded-host',
+                           'x-forwarded-port', 'x-forwarded-server', 'x-client-ip', 'x-originating-ip',
+                           'x-remote-ip', 'x-remote-addr', 'cf-connecting-ip', 'true-client-ip',
+                           'x-cluster-client-ip', 'fastly-client-ip', 'x-azure-clientip']
+            
+            for header in hop_by_hop + proxy_headers:
+                headers.pop(header, None)
+                headers.pop(header.lower(), None)  # Ensure case-insensitive removal
+            
+            # Add custom request headers first (so they can override defaults)
+            for key, values in query_params.items():
+                if key.startswith('request_headers[') and key.endswith(']'):
+                    header_name = key[16:-1]  # Remove 'request_headers[' and ']'
+                    headers[header_name] = values[0]
+            
+            # Handle the proxy request using self.command for the HTTP method
+            self.proxy_request(self.command, target_url, query_params, instance)
+            
+        except Exception as e:
+            self.log_message(f"Error handling request: {e}")
+            self.send_error_response(500, "Internal server error")
+
 
 class ReverseProxyServer:
     """Main reverse proxy server"""
@@ -834,12 +654,7 @@ class ReverseProxyServer:
     def __init__(self, config_file: str = 'proxy_config.json'):
         self.config_file = config_file
         self.instances: Dict[str, ProxyInstance] = {}
-        self.disk_cache = DiskCache()
         self.load_config()
-        
-        # Start cache cleanup thread
-        self.cleanup_thread = threading.Thread(target=self.cache_cleanup_worker, daemon=True)
-        self.cleanup_thread.start()
     
     def load_config(self):
         """Load configuration from file"""
@@ -847,18 +662,11 @@ class ReverseProxyServer:
             with open(self.config_file, 'r') as f:
                 config = json.load(f)
             
-            # Load global configuration options
-            self.clear_cache_on_start = config.get('clear_cache_on_start', False)
-            
             self.instances = {}
             for name, instance_config in config.get('instances', {}).items():
                 self.instances[name] = ProxyInstance(name, instance_config)
             
             print(f"Loaded {len(self.instances)} proxy instances")
-            
-            # Clear cache on startup if configured
-            if self.clear_cache_on_start:
-                self.clear_startup_cache()
             
         except FileNotFoundError:
             print(f"Config file {self.config_file} not found. Creating default config.")
@@ -870,24 +678,15 @@ class ReverseProxyServer:
     def create_default_config(self):
         """Create a default configuration file"""
         default_config = {
-            "clear_cache_on_start": False,
             "instances": {
                 "default": {
                     "access_mode": "both",
                     "tokens": ["your-secret-token-here"],
-                    "cache_enabled": True,
-                    "cache_ttl": 3600,
-                    "cache_max_size_mb": 0,
-                    "rate_limit": 100,
                     "allowed_cidrs": []
                 },
                 "internal": {
                     "access_mode": "local",
                     "tokens": [],
-                    "cache_enabled": False,
-                    "cache_ttl": 0,
-                    "cache_max_size_mb": 0,
-                    "rate_limit": 0,
                     "allowed_cidrs": ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
                 }
             }
@@ -899,38 +698,10 @@ class ReverseProxyServer:
         print(f"Created default config file: {self.config_file}")
         self.load_config()
     
-    def clear_startup_cache(self):
-        """Clear cache directory on startup if configured"""
-        if os.path.exists(self.disk_cache.cache_dir):
-            try:
-                # Get cache stats before clearing
-                cache_stats = self.disk_cache.get_cache_stats()
-                files_count = cache_stats['total_files']
-                size_mb = cache_stats['total_size_mb']
-                
-                # Remove all cache files
-                shutil.rmtree(self.disk_cache.cache_dir)
-                
-                # Recreate the cache directory
-                os.makedirs(self.disk_cache.cache_dir)
-                
-                print(f"Cache cleared on startup: removed {files_count} files ({size_mb}MB)")
-                
-            except Exception as e:
-                print(f"Warning: Failed to clear cache on startup: {e}")
-        else:
-            print("Cache directory didn't exist, nothing to clear")
-    
-    def cache_cleanup_worker(self):
-        """Background worker to clean up expired cache entries"""
-        while True:
-            time.sleep(300)  # Clean up every 5 minutes
-            self.disk_cache.clear_expired()
-    
     def create_handler(self):
         """Create a request handler with the current configuration"""
         def handler(*args, **kwargs):
-            return ReverseProxyHandler(*args, proxy_config=self.instances, disk_cache=self.disk_cache, **kwargs)
+            return ReverseProxyHandler(*args, proxy_config=self.instances, **kwargs)
         return handler
     
     def run(self, host: str = '0.0.0.0', port: int = 8080):
@@ -1000,13 +771,6 @@ class ReverseProxyServer:
         print(f"Reverse Proxy Server starting on {host}:{port}")
         print(f"Available instances: {list(self.instances.keys())}")
         print("Multi-threaded server - supports concurrent requests")
-        
-        # Print cache stats
-        cache_stats = self.disk_cache.get_cache_stats()
-        print(f"Disk cache: {cache_stats['total_files']} files, {cache_stats['total_size_mb']}MB ({cache_stats['total_size_bytes']} bytes)")
-        if cache_stats['expired_files'] > 0:
-            print(f"Cache cleanup needed: {cache_stats['expired_files']} expired files")
-        
         print("Server ready! Press Ctrl+C to stop")
         
         try:

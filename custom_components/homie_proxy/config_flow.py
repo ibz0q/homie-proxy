@@ -134,6 +134,110 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user", data_schema=DATA_SCHEMA, errors=errors
         )
 
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        """Get the options flow for this integration."""
+        return OptionsFlow(config_entry)
+
+
+class OptionsFlow(config_entries.OptionsFlow):
+    """Handle options flow for HomieProxy."""
+
+    async def async_step_init(self, user_input=None):
+        """Manage the options."""
+        errors = {}
+        
+        if user_input is not None:
+            try:
+                # Validate tokens
+                tokens_input = user_input.get("tokens", "").strip()
+                if tokens_input:
+                    # Split by newlines and clean up
+                    tokens = [token.strip() for token in tokens_input.split('\n') if token.strip()]
+                    if not tokens:
+                        raise InvalidToken
+                else:
+                    # If no tokens specified, generate a new one
+                    tokens = [generate_token()]
+                
+                # Validate restrictions
+                restrict_out = user_input.get("restrict_out", "any")
+                restrict_out_cidrs = user_input.get("restrict_out_cidrs", "").strip()
+                
+                if restrict_out == "custom":
+                    if not restrict_out_cidrs:
+                        raise InvalidCIDR
+                    if not validate_cidr(restrict_out_cidrs):
+                        raise InvalidCIDR
+                    final_restrict_out = restrict_out_cidrs
+                else:
+                    final_restrict_out = restrict_out
+                
+                # Validate inbound restrictions (optional)
+                restrict_in_cidrs = user_input.get("restrict_in_cidrs", "").strip()
+                if restrict_in_cidrs and not validate_cidr(restrict_in_cidrs):
+                    raise InvalidCIDR
+                
+                # Update config entry data
+                new_data = {
+                    **self.config_entry.data,
+                    "tokens": tokens,
+                    "restrict_out": final_restrict_out,
+                    "restrict_in": restrict_in_cidrs if restrict_in_cidrs else None,
+                }
+                
+                return self.async_create_entry(
+                    title="",
+                    data=new_data
+                )
+                
+            except InvalidToken:
+                errors["tokens"] = "invalid_token"
+            except InvalidCIDR:
+                errors["base"] = "invalid_cidr"
+            except Exception:
+                _LOGGER.exception("Unexpected exception in options flow")
+                errors["base"] = "unknown"
+
+        # Get current values
+        current_tokens = self.config_entry.data.get("tokens", [])
+        current_restrict_out = self.config_entry.data.get("restrict_out", "any")
+        current_restrict_in = self.config_entry.data.get("restrict_in", "")
+        
+        # Determine current restriction display values
+        if current_restrict_out in ["any", "external", "internal"]:
+            restrict_out_dropdown = current_restrict_out
+            restrict_out_cidrs_field = ""
+        else:
+            restrict_out_dropdown = "custom"
+            restrict_out_cidrs_field = current_restrict_out
+        
+        # Create schema for options
+        options_schema = vol.Schema({
+            vol.Required("tokens", default='\n'.join(current_tokens)): str,
+            vol.Required("restrict_out", default=restrict_out_dropdown): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        {"value": key, "label": label} 
+                        for key, label in RESTRICT_OPTIONS
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN
+                )
+            ),
+            vol.Optional("restrict_out_cidrs", default=restrict_out_cidrs_field): str,
+            vol.Optional("restrict_in_cidrs", default=current_restrict_in or ""): str,
+        })
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=options_schema,
+            errors=errors,
+            description_placeholders={
+                "name": self.config_entry.data.get("name", ""),
+                "current_tokens": f"{len(current_tokens)} token(s) configured"
+            }
+        )
+
 
 class CannotConnect(exceptions.HomeAssistantError):
     """Error to indicate we cannot connect."""
@@ -148,4 +252,8 @@ class InvalidCIDR(exceptions.HomeAssistantError):
 
 
 class AlreadyConfigured(exceptions.HomeAssistantError):
-    """Error to indicate device is already configured.""" 
+    """Error to indicate device is already configured."""
+
+
+class InvalidToken(exceptions.HomeAssistantError):
+    """Error to indicate there is an invalid token.""" 

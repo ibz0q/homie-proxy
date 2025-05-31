@@ -16,11 +16,30 @@
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
       "invalid_name": "Invalid name - must be at least 2 characters",
       "invalid_cidr": "Invalid CIDR format",
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
+      "already_configured": "[%key:common::config_flow::error::already_configured%]",
       "unknown": "[%key:common::config_flow::error::unknown%]"
     },
     "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+      "already_configured": "[%key:common::config_flow::abort::already_configured%]"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure HomieProxy: {name}",
+        "description": "Update access tokens and restrictions for this proxy endpoint. Currently: {current_tokens}",
+        "data": {
+          "tokens": "Access Tokens (one per line)",
+          "restrict_out": "Outbound Access Restrictions", 
+          "restrict_out_cidrs": "Custom CIDR Range",
+          "restrict_in_cidrs": "Inbound IP Restrictions (Optional)"
+        }
+      }
+    },
+    "error": {
+      "invalid_token": "At least one valid token is required",
+      "invalid_cidr": "Invalid CIDR format",
+      "unknown": "[%key:common::config_flow::error::unknown%]"
     }
   }
 } 

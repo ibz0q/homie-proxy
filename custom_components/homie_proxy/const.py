@@ -16,9 +16,9 @@ DEFAULT_RESTRICT_OUT = "any"
 
 # Restriction options
 RESTRICT_OPTIONS = [
-    ("any", "Allow all networks = both"),
-    ("external", "External networks only (external)"),
-    ("internal", "Internal networks only (internal)"),
+    ("any", "Allow all networks"),
+    ("external", "External networks only"),
+    ("internal", "Internal networks only"),
     ("custom", "Custom cidr"),
 ]
 

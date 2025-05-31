@@ -10,24 +10,17 @@ import voluptuous as vol
 
 from homeassistant import config_entries, exceptions
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
 
-from .const import DOMAIN, RESTRICT_OPTIONS
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Schema with proper dropdown selector
+# Simple schema without SelectSelector to avoid compatibility issues
 DATA_SCHEMA = vol.Schema({
     vol.Required("name", default="external-api-route"): str,
-    vol.Required("restrict_out", default="any"): SelectSelector(
-        SelectSelectorConfig(
-            options=[
-                {"value": key, "label": label} 
-                for key, label in RESTRICT_OPTIONS
-            ],
-            mode=SelectSelectorMode.DROPDOWN
-        )
-    ),
+    vol.Required("restrict_out", default="any"): vol.In([
+        "any", "external", "internal", "custom"
+    ]),
     vol.Optional("restrict_out_cidrs", default=""): str,
     vol.Optional("restrict_in_cidrs", default=""): str,
 })
@@ -89,7 +82,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for HomieProxy."""
 
     VERSION = 1
-    CONNECTION_CLASS = config_entries.CONN_CLASS_LOCAL_PUSH
 
     async def async_step_user(self, user_input=None):
         """Handle the initial step."""
@@ -142,6 +134,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class OptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for HomieProxy."""
+
+    def __init__(self, config_entry):
+        """Initialize options flow."""
+        self.config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -212,18 +208,12 @@ class OptionsFlow(config_entries.OptionsFlow):
             restrict_out_dropdown = "custom"
             restrict_out_cidrs_field = current_restrict_out
         
-        # Create schema for options
+        # Create schema for options - simplified without SelectSelector
         options_schema = vol.Schema({
             vol.Required("tokens", default='\n'.join(current_tokens)): str,
-            vol.Required("restrict_out", default=restrict_out_dropdown): SelectSelector(
-                SelectSelectorConfig(
-                    options=[
-                        {"value": key, "label": label} 
-                        for key, label in RESTRICT_OPTIONS
-                    ],
-                    mode=SelectSelectorMode.DROPDOWN
-                )
-            ),
+            vol.Required("restrict_out", default=restrict_out_dropdown): vol.In([
+                "any", "external", "internal", "custom"
+            ]),
             vol.Optional("restrict_out_cidrs", default=restrict_out_cidrs_field): str,
             vol.Optional("restrict_in_cidrs", default=current_restrict_in or ""): str,
         })

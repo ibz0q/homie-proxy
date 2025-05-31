@@ -7,7 +7,7 @@ print("=" * 60)
 print("DNS OVERRIDE TEST - REVERSE PROXY")
 print("=" * 60)
 
-base_url = "http://localhost:8082/default?token=your-secret-token-here"
+base_url = "http://localhost:8084/default?token=your-secret-token-here"
 
 print("\n📋 TESTING DNS OVERRIDE FUNCTIONALITY:")
 print("-" * 50)
@@ -26,9 +26,9 @@ try:
 except Exception as e:
     print(f"❌ Error: {e}")
 
-# Test 2: Custom DNS servers (Google DNS)
-print("\n🔸 Test 2: Custom DNS servers (Google DNS)")
-dns_url = f"{base_url}&url=https://httpbin.org/get&dns_server[]=8.8.8.8&dns_server[]=8.8.4.4"
+# Test 2: Custom DNS servers (Google DNS) with TLS bypass
+print("\n🔸 Test 2: Custom DNS servers (Google DNS) with TLS bypass")
+dns_url = f"{base_url}&url=https://httpbin.org/get&dns_server[]=8.8.8.8&dns_server[]=8.8.4.4&skip_tls_checks=all"
 try:
     print("📥 Making request with custom DNS servers (8.8.8.8, 8.8.4.4)...")
     response = requests.get(dns_url, timeout=10)
@@ -42,9 +42,9 @@ try:
 except Exception as e:
     print(f"❌ Error: {e}")
 
-# Test 3: Alternative DNS servers (Cloudflare)
-print("\n🔸 Test 3: Alternative DNS servers (Cloudflare)")
-cloudflare_url = f"{base_url}&url=https://httpbin.org/headers&dns_server[]=1.1.1.1&dns_server[]=1.0.0.1"
+# Test 3: Alternative DNS servers (Cloudflare) with TLS bypass
+print("\n🔸 Test 3: Alternative DNS servers (Cloudflare) with TLS bypass")
+cloudflare_url = f"{base_url}&url=https://httpbin.org/headers&dns_server[]=1.1.1.1&dns_server[]=1.0.0.1&skip_tls_checks=all"
 try:
     print("📥 Making request with Cloudflare DNS servers (1.1.1.1, 1.0.0.1)...")
     response = requests.get(cloudflare_url, timeout=10)
@@ -60,9 +60,9 @@ try:
 except Exception as e:
     print(f"❌ Error: {e}")
 
-# Test 4: Custom DNS with different hostname
-print("\n🔸 Test 4: Custom DNS with different hostname")
-different_host_url = f"{base_url}&url=https://example.com&dns_server[]=8.8.8.8"
+# Test 4: Custom DNS with different hostname and TLS bypass
+print("\n🔸 Test 4: Custom DNS with different hostname and TLS bypass")
+different_host_url = f"{base_url}&url=https://example.com&dns_server[]=8.8.8.8&skip_tls_checks=all"
 try:
     print("📥 Making request to example.com with custom DNS...")
     response = requests.get(different_host_url, timeout=10)
@@ -75,9 +75,9 @@ try:
 except Exception as e:
     print(f"❌ Error: {e}")
 
-# Test 5: Multiple DNS servers (fallback test)
-print("\n🔸 Test 5: Multiple DNS servers (fallback test)")
-multi_dns_url = f"{base_url}&url=https://httpbin.org/uuid&dns_server[]=9.9.9.9&dns_server[]=8.8.8.8&dns_server[]=1.1.1.1"
+# Test 5: Multiple DNS servers (fallback test) with TLS bypass
+print("\n🔸 Test 5: Multiple DNS servers (fallback test) with TLS bypass")
+multi_dns_url = f"{base_url}&url=https://httpbin.org/uuid&dns_server[]=9.9.9.9&dns_server[]=8.8.8.8&dns_server[]=1.1.1.1&skip_tls_checks=all"
 try:
     print("📥 Making request with multiple DNS servers for fallback...")
     response = requests.get(multi_dns_url, timeout=12)

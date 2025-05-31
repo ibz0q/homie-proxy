@@ -6,7 +6,7 @@ print("=" * 60)
 print("SIMPLE BASIC TEST - REVERSE PROXY")
 print("=" * 60)
 
-base_url = "http://localhost:8080/default?token=your-secret-token-here"
+base_url = "http://localhost:8085/default?token=your-secret-token-here"
 
 print("\nTesting basic functionality...")
 print("-" * 50)

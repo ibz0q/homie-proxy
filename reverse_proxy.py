@@ -6,21 +6,19 @@ Minimal dependencies, configurable instances with authentication and restriction
 
 import json
 import ipaddress
-import socket
 import ssl
 import urllib.parse
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, List, Optional
-import time
-import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Dict
+import socket
 import os
 import subprocess
+import select
 
 try:
     import requests
     from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
     import urllib3
     from urllib3.exceptions import InsecureRequestWarning
     # Note: SubjectAltNameWarning and InsecurePlatformWarning may not exist in newer urllib3 versions
@@ -200,63 +198,53 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 self.send_error_response(401, "Invalid or missing token")
                 return
             
-            # Configure DNS servers and resolve hostname if needed
-            dns_servers = query_params.get('dns_server[]', [])
-            original_target_url = target_url
+            # Get request body for methods that might have a body
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = None
+            if content_length > 0:
+                body = self.rfile.read(content_length)
+            elif self.command in ['POST', 'PUT', 'PATCH']:
+                # Some clients might send body without Content-Length
+                try:
+                    # Try to read any available data (non-blocking)
+                    if select.select([self.rfile], [], [], 0)[0]:
+                        body = self.rfile.read()
+                except:
+                    pass
             
-            if dns_servers:
-                self.log_message(f"Custom DNS servers specified: {', '.join(dns_servers)}")
+            # Prepare request session
+            session = requests.Session()
+            
+            # Clear any default User-Agent from the session
+            session.headers.pop('User-Agent', None)
+            
+            # Configure TLS error handling
+            skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
+            if skip_tls_checks_param[0]:
+                skip_tls_value = skip_tls_checks_param[0].lower()
                 
-                # Parse the target URL to extract hostname
-                from urllib.parse import urlparse, urlunparse
-                parsed_url = urlparse(target_url)
-                
-                if parsed_url.hostname:
-                    # Resolve hostname using custom DNS servers
-                    resolved_ip = self.resolve_hostname_with_dns(parsed_url.hostname, dns_servers)
-                    
-                    # If resolution successful and different from original, update URL
-                    if resolved_ip != parsed_url.hostname:
-                        # Replace hostname with resolved IP in the URL
-                        netloc = resolved_ip
-                        if parsed_url.port:
-                            netloc += f":{parsed_url.port}"
-                        
-                        # Reconstruct URL with IP address
-                        modified_url = urlunparse((
-                            parsed_url.scheme,
-                            netloc,
-                            parsed_url.path,
-                            parsed_url.params,
-                            parsed_url.query,
-                            parsed_url.fragment
-                        ))
-                        
-                        target_url = modified_url
-                        self.log_message(f"Modified target URL: {original_target_url} -> {target_url}")
-                        
-                        # Ensure Host header still contains original hostname for virtual hosting
-                        headers['Host'] = parsed_url.hostname
-                        if parsed_url.port and parsed_url.port not in [80, 443]:
-                            headers['Host'] += f":{parsed_url.port}"
-                        self.log_message(f"Set Host header to original hostname: {headers['Host']}")
+                # Handle boolean-style values (true/false) and convert to 'all'
+                if skip_tls_value in ['true', '1', 'yes']:
+                    skip_tls_checks = ['all']
+                    self.log_message("TLS parameter 'true' detected, ignoring ALL TLS errors")
                 else:
-                    self.log_message("No hostname found in target URL for DNS resolution")
-            else:
-                # Fix Host header normally when no custom DNS is used
-                from urllib.parse import urlparse
-                parsed_target = urlparse(target_url)
-                if parsed_target.hostname:
-                    # Check if the hostname is an IP address
-                    try:
-                        ipaddress.ip_address(parsed_target.hostname)
-                        # It's an IP address - set Host header to the IP (some servers expect this)
-                        headers['Host'] = parsed_target.hostname
-                        self.log_message(f"Fixed Host header to IP: {headers['Host']}")
-                    except ValueError:
-                        # It's a hostname - always use just the hostname (no port for virtual hosts)
-                        headers['Host'] = parsed_target.hostname
-                        self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
+                    # Parse comma-separated list of TLS errors to ignore
+                    skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
+                
+                # Check for ALL option - completely disable TLS verification
+                if 'all' in skip_tls_checks:
+                    session.verify = False
+                    urllib3.disable_warnings(InsecureRequestWarning)
+                    if SubjectAltNameWarning is not None:
+                        urllib3.disable_warnings(SubjectAltNameWarning)
+                    if InsecurePlatformWarning is not None:
+                        urllib3.disable_warnings(InsecurePlatformWarning)
+                    self.log_message("Ignoring ALL TLS errors - complete TLS verification disabled")
+                else:
+                    # Mount custom HTTPS adapter for specific error types
+                    https_adapter = CustomHTTPSAdapter(skip_tls_checks=skip_tls_checks)
+                    session.mount('https://', https_adapter)
+                    self.log_message(f"Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
             
             # Configure redirect following
             follow_redirects_param = query_params.get('follow_redirects', ['false'])
@@ -287,6 +275,20 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                     header_name = key[16:-1]  # Remove 'request_headers[' and ']'
                     headers[header_name] = values[0]
             
+            # Fix Host header for proper virtual hosting
+            parsed_target = urllib.parse.urlparse(target_url)
+            if parsed_target.hostname:
+                # Check if the hostname is an IP address
+                try:
+                    ipaddress.ip_address(parsed_target.hostname)
+                    # It's an IP address - set Host header to the IP
+                    headers['Host'] = parsed_target.hostname
+                    self.log_message(f"Fixed Host header to IP: {headers['Host']}")
+                except ValueError:
+                    # It's a hostname - always use just the hostname (no port for virtual hosts)
+                    headers['Host'] = parsed_target.hostname
+                    self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
+            
             # Always ensure User-Agent is explicitly set (use blank if none provided)
             user_agent_set = False
             for header_name in headers.keys():
@@ -306,7 +308,7 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 original_content_type = self.headers.get('Content-Type')
                 if original_content_type:
                     headers['Content-Type'] = original_content_type
-                elif method in ['POST', 'PUT', 'PATCH']:
+                elif self.command in ['POST', 'PUT', 'PATCH']:
                     # Default to JSON if not specified for methods that typically send JSON
                     try:
                         json.loads(body.decode('utf-8'))
@@ -316,7 +318,7 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             
             # Make the request
             request_kwargs = {
-                'method': method,
+                'method': self.command,
                 'url': target_url,
                 'headers': headers,
                 'stream': True,
@@ -330,7 +332,7 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             
             # Log the request headers being sent to target URL
             self.log_message(f"REQUEST to {target_url}")
-            self.log_message(f"Request method: {method}")
+            self.log_message(f"Request method: {self.command}")
             if headers:
                 self.log_message("Request headers being sent to target:")
                 for header_name, header_value in headers.items():
@@ -413,139 +415,6 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
         })
         self.wfile.write(error_response.encode())
 
-    def resolve_hostname_with_dns(self, hostname: str, dns_servers: List[str]) -> str:
-        """Resolve hostname using custom DNS servers"""
-        if not dns_servers:
-            return hostname
-        
-        # Check if hostname is already an IP address
-        try:
-            ipaddress.ip_address(hostname)
-            self.log_message(f"Hostname {hostname} is already an IP address")
-            return hostname
-        except ValueError:
-            pass
-        
-        self.log_message(f"Resolving {hostname} using custom DNS servers: {', '.join(dns_servers)}")
-        
-        # Try each DNS server until one works
-        for dns_server in dns_servers:
-            try:
-                resolved_ip = self._query_dns_server(hostname, dns_server)
-                if resolved_ip:
-                    self.log_message(f"Successfully resolved {hostname} to {resolved_ip} via {dns_server}")
-                    return resolved_ip
-            except Exception as e:
-                self.log_message(f"DNS resolution failed using {dns_server}: {e}")
-                continue
-        
-        # If all DNS servers fail, return original hostname
-        self.log_message(f"DNS resolution failed for {hostname}, using original hostname")
-        return hostname
-    
-    def _query_dns_server(self, hostname: str, dns_server: str) -> Optional[str]:
-        """Send a DNS query to a specific DNS server"""
-        import socket
-        import struct
-        import random
-        
-        try:
-            # Create DNS query packet
-            transaction_id = random.randint(0, 65535)
-            
-            # DNS header (12 bytes)
-            header = struct.pack('!HHHHHH', transaction_id, 0x0100, 1, 0, 0, 0)
-            
-            # DNS question section
-            question = b''
-            
-            # Convert hostname to DNS format
-            parts = hostname.split('.')
-            for part in parts:
-                question += struct.pack('!B', len(part)) + part.encode('ascii')
-            question += b'\x00'  # End of name
-            
-            # Question type (A record = 1) and class (IN = 1)
-            question += struct.pack('!HH', 1, 1)
-            
-            # Complete DNS query
-            query = header + question
-            
-            # Send UDP query to DNS server
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(5)  # 5 second timeout
-            
-            sock.sendto(query, (dns_server, 53))
-            response, _ = sock.recvfrom(512)
-            sock.close()
-            
-            # Parse DNS response
-            if len(response) < 12:
-                return None
-            
-            # Check if response is valid
-            response_id = struct.unpack('!H', response[0:2])[0]
-            if response_id != transaction_id:
-                return None
-            
-            # Check response flags
-            flags = struct.unpack('!H', response[2:4])[0]
-            if (flags & 0x8000) == 0:  # Not a response
-                return None
-            if (flags & 0x000F) != 0:  # Error in response
-                return None
-            
-            # Get number of answers
-            answers = struct.unpack('!H', response[6:8])[0]
-            if answers == 0:
-                return None
-            
-            # Skip question section
-            offset = 12
-            while offset < len(response) and response[offset] != 0:
-                length = response[offset]
-                if length & 0xC0:  # Compression pointer
-                    offset += 2
-                    break
-                else:
-                    offset += length + 1
-            if offset < len(response) and response[offset] == 0:
-                offset += 1
-            offset += 4  # Skip QTYPE and QCLASS
-            
-            # Parse answer section
-            while answers > 0 and offset < len(response):
-                # Skip name (can be compressed)
-                if response[offset] & 0xC0:  # Compression pointer
-                    offset += 2
-                else:
-                    while offset < len(response) and response[offset] != 0:
-                        offset += response[offset] + 1
-                    if offset < len(response):
-                        offset += 1
-                
-                if offset + 10 > len(response):
-                    break
-                
-                # Read type, class, TTL, data length
-                record_type, record_class, ttl, data_length = struct.unpack('!HHIH', response[offset:offset+10])
-                offset += 10
-                
-                # If it's an A record (type 1), extract IP address
-                if record_type == 1 and data_length == 4:
-                    ip_bytes = response[offset:offset+4]
-                    ip_address = '.'.join(str(b) for b in ip_bytes)
-                    return ip_address
-                
-                offset += data_length
-                answers -= 1
-            
-            return None
-            
-        except Exception as e:
-            self.log_message(f"Error querying DNS server {dns_server}: {e}")
-            return None
-
     def get_client_ip(self) -> str:
         """Get the real client IP address"""
         # Check for forwarded headers first
@@ -558,94 +427,6 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             return real_ip
         
         return self.client_address[0]
-    
-    def proxy_request(self, method: str, target_url: str, query_params: Dict, instance: ProxyInstance):
-        """Proxy the request to the target URL"""
-        try:
-            # Get request body for all methods that might have a body
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = None
-            if content_length > 0:
-                body = self.rfile.read(content_length)
-            elif method in ['POST', 'PUT', 'PATCH']:
-                # Some clients might send body without Content-Length
-                try:
-                    # Try to read any available data (non-blocking)
-                    import select
-                    if select.select([self.rfile], [], [], 0)[0]:
-                        body = self.rfile.read()
-                except:
-                    pass
-            
-            # Prepare request session
-            session = requests.Session()
-            
-            # Clear any default User-Agent from the session
-            session.headers.pop('User-Agent', None)
-            
-            # Configure TLS error handling
-            skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
-            if skip_tls_checks_param[0]:
-                skip_tls_value = skip_tls_checks_param[0].lower()
-                
-                # Handle boolean-style values (true/false) and convert to 'all'
-                if skip_tls_value in ['true', '1', 'yes']:
-                    skip_tls_checks = ['all']
-                    self.log_message("TLS parameter 'true' detected, ignoring ALL TLS errors")
-                else:
-                    # Parse comma-separated list of TLS errors to ignore
-                    skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
-                
-                # Check for ALL option - completely disable TLS verification
-                if 'all' in skip_tls_checks:
-                    session.verify = False
-                    urllib3.disable_warnings(InsecureRequestWarning)
-                    if SubjectAltNameWarning is not None:
-                        urllib3.disable_warnings(SubjectAltNameWarning)
-                    if InsecurePlatformWarning is not None:
-                        urllib3.disable_warnings(InsecurePlatformWarning)
-                    self.log_message("Ignoring ALL TLS errors - complete TLS verification disabled")
-                else:
-                    # Mount custom HTTPS adapter for specific error types
-                    https_adapter = CustomHTTPSAdapter(skip_tls_checks=skip_tls_checks)
-                    session.mount('https://', https_adapter)
-                    self.log_message(f"Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
-            
-            # Configure redirect following
-            follow_redirects_param = query_params.get('follow_redirects', ['false'])
-            follow_redirects = follow_redirects_param[0].lower() in ['true', '1', 'yes']
-            if follow_redirects:
-                self.log_message("Redirect following enabled")
-            else:
-                self.log_message("Redirect following disabled (default)")
-            
-            # Prepare headers
-            headers = dict(self.headers)
-            
-            # Remove hop-by-hop headers and proxy-specific headers
-            hop_by_hop = ['connection', 'keep-alive', 'proxy-authenticate', 
-                         'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']
-            proxy_headers = ['x-forwarded-for', 'x-real-ip', 'x-forwarded-proto', 'x-forwarded-host',
-                           'x-forwarded-port', 'x-forwarded-server', 'x-client-ip', 'x-originating-ip',
-                           'x-remote-ip', 'x-remote-addr', 'cf-connecting-ip', 'true-client-ip',
-                           'x-cluster-client-ip', 'fastly-client-ip', 'x-azure-clientip']
-            
-            for header in hop_by_hop + proxy_headers:
-                headers.pop(header, None)
-                headers.pop(header.lower(), None)  # Ensure case-insensitive removal
-            
-            # Add custom request headers first (so they can override defaults)
-            for key, values in query_params.items():
-                if key.startswith('request_headers[') and key.endswith(']'):
-                    header_name = key[16:-1]  # Remove 'request_headers[' and ']'
-                    headers[header_name] = values[0]
-            
-            # Handle the proxy request using self.command for the HTTP method
-            self.proxy_request(self.command, target_url, query_params, instance)
-            
-        except Exception as e:
-            self.log_message(f"Error handling request: {e}")
-            self.send_error_response(500, "Internal server error")
 
 
 class ReverseProxyServer:
@@ -707,8 +488,6 @@ class ReverseProxyServer:
     def run(self, host: str = '0.0.0.0', port: int = 8080):
         """Run the proxy server"""
         # Check if port is already in use with multiple methods
-        import socket
-        import subprocess
         
         # Method 1: Try to connect to the port (most reliable)
         try:

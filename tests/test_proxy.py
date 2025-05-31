@@ -217,22 +217,22 @@ def test_tls_bypass():
 
 def test_internal_instance():
     """Test internal instance (no token required)"""
-    print("Testing internal instance (no auth)...")
+    print("Testing internal-only instance (no auth)...")
     
-    url = f"{BASE_URL}/internal"
+    url = f"{BASE_URL}/internal-only"
     params = {
-        'url': 'https://httpbin.org/get'
+        'url': 'http://127.0.0.1:8080/test'  # Use internal URL that should be allowed
     }
     
     try:
         response = requests.get(url, params=params, timeout=8)
         print(f"Status: {response.status_code}")
-        if response.status_code == 200:
-            print("✓ Internal instance test passed\n")
+        if response.status_code in [200, 404, 502]:  # 404/502 are OK - means access was allowed but target doesn't exist
+            print("✓ Internal-only instance test passed\n")
         else:
-            print(f"✗ Internal instance test failed with status {response.status_code}\n")
+            print(f"✗ Internal-only instance test failed with status {response.status_code}\n")
     except Exception as e:
-        print(f"✗ Internal instance test failed: {e}\n")
+        print(f"✗ Internal-only instance test failed: {e}\n")
 
 def test_rate_limiting():
     """Test rate limiting (if configured)"""

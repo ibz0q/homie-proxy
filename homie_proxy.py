@@ -84,30 +84,75 @@ class ProxyInstance:
     
     def __init__(self, name: str, config: Dict):
         self.name = name
-        self.access_mode = config.get('access_mode', 'both')  # local, external, both
+        # New naming scheme for network access control
+        self.allowed_networks_out = config.get('allowed_networks_out', 'both')  # external, internal, both
+        self.allowed_networks_out_cidrs = [ipaddress.ip_network(cidr) for cidr in config.get('allowed_networks_out_cidrs', [])]
         self.tokens = set(config.get('tokens', []))
-        self.allowed_cidrs = [ipaddress.ip_network(cidr) for cidr in config.get('allowed_cidrs', [])]
+        self.restrict_access_to_cidrs = [ipaddress.ip_network(cidr) for cidr in config.get('restrict_access_to_cidrs', [])]
+        
+        # Backward compatibility - support old parameter names
+        if 'access_mode' in config:
+            self.allowed_networks_out = config['access_mode']
+        if 'allowed_cidrs' in config:
+            self.restrict_access_to_cidrs = [ipaddress.ip_network(cidr) for cidr in config['allowed_cidrs']]
+        if 'allowed_networks_cidrs' in config:
+            self.allowed_networks_out_cidrs = [ipaddress.ip_network(cidr) for cidr in config['allowed_networks_cidrs']]
     
-    def is_access_allowed(self, client_ip: str) -> bool:
-        """Check if access is allowed based on IP and access mode"""
+    def is_client_access_allowed(self, client_ip: str) -> bool:
+        """Check if client IP is allowed to access this proxy instance"""
         try:
             ip = ipaddress.ip_address(client_ip)
             
-            # Check CIDR restrictions first
-            if self.allowed_cidrs:
-                allowed = any(ip in cidr for cidr in self.allowed_cidrs)
-                if not allowed:
-                    return False
-            
-            # Check access mode
-            if self.access_mode == 'local':
-                return ip.is_private
-            elif self.access_mode == 'external':
-                return not ip.is_private
-            else:  # both
-                return True
+            # If restrict_access_to_cidrs is specified, check against them
+            if self.restrict_access_to_cidrs:
+                return any(ip in cidr for cidr in self.restrict_access_to_cidrs)
+            else:
+                # If not specified, only allow local IPs (localhost, private networks)
+                return ip.is_loopback or ip.is_private
                 
         except ValueError:
+            return False
+    
+    def is_target_url_allowed(self, target_url: str) -> bool:
+        """Check if the target URL is allowed based on network access configuration"""
+        try:
+            parsed_url = urllib.parse.urlparse(target_url)
+            hostname = parsed_url.hostname
+            
+            if not hostname:
+                return False
+            
+            # Resolve hostname to IP for checking
+            try:
+                # For IP addresses, use directly
+                target_ip = ipaddress.ip_address(hostname)
+            except ValueError:
+                # For hostnames, resolve to IP
+                try:
+                    import socket
+                    resolved_ip = socket.gethostbyname(hostname)
+                    target_ip = ipaddress.ip_address(resolved_ip)
+                except (socket.gaierror, ValueError):
+                    # If resolution fails, deny access for safety
+                    return False
+            
+            # If allowed_networks_out_cidrs is specified, use it (overrides allowed_networks_out)
+            if self.allowed_networks_out_cidrs:
+                return any(target_ip in cidr for cidr in self.allowed_networks_out_cidrs)
+            
+            # Otherwise, use allowed_networks_out mode
+            if self.allowed_networks_out == 'external':
+                # Only allow external (non-private) IPs
+                return not target_ip.is_private and not target_ip.is_loopback
+            elif self.allowed_networks_out == 'internal':
+                # Only allow internal (private/loopback) IPs  
+                return target_ip.is_private or target_ip.is_loopback
+            else:  # both
+                # Allow everything (0.0.0.0/0)
+                return True
+                
+        except Exception:
+            # If anything goes wrong, deny access for safety
             return False
     
     def is_token_valid(self, token: str) -> bool:
@@ -164,9 +209,17 @@ class HomieProxyHandler(BaseHTTPRequestHandler):
             client_ip = self.get_client_ip()
             
             # Check IP access
-            if not instance.is_access_allowed(client_ip):
+            if not instance.is_client_access_allowed(client_ip):
+                self.log_message(f"Client IP access denied: {client_ip} not allowed for instance '{instance_name}'")
+                if instance.restrict_access_to_cidrs:
+                    allowed_cidrs_str = ', '.join(str(cidr) for cidr in instance.restrict_access_to_cidrs)
+                    self.log_message(f"Instance allowed CIDRs: {allowed_cidrs_str}")
+                else:
+                    self.log_message("Instance has no allowed_cidrs specified - only allowing local IPs")
                 self.send_error_response(403, "Access denied from your IP")
                 return
+            
+            self.log_message(f"Client IP access allowed: {client_ip} for instance '{instance_name}'")
             
             # Parse query parameters
             query_params = {}
@@ -180,6 +233,22 @@ class HomieProxyHandler(BaseHTTPRequestHandler):
                 return
             
             target_url = target_urls[0]
+            
+            # Check target URL access
+            if not instance.is_target_url_allowed(target_url):
+                if instance.allowed_networks_out_cidrs:
+                    cidrs_str = ', '.join(str(cidr) for cidr in instance.allowed_networks_out_cidrs)
+                    self.log_message(f"Target URL access denied: {target_url} not in allowed_networks_out_cidrs '{cidrs_str}'")
+                else:
+                    self.log_message(f"Target URL access denied: {target_url} not allowed for allowed_networks_out '{instance.allowed_networks_out}'")
+                self.send_error_response(403, "Access denied to the target URL")
+                return
+            
+            if instance.allowed_networks_out_cidrs:
+                cidrs_str = ', '.join(str(cidr) for cidr in instance.allowed_networks_out_cidrs)
+                self.log_message(f"Target URL access allowed: {target_url} matches allowed_networks_out_cidrs '{cidrs_str}'")
+            else:
+                self.log_message(f"Target URL access allowed: {target_url} for allowed_networks_out '{instance.allowed_networks_out}'")
             
             # Check authentication
             tokens = query_params.get('token', [])
@@ -466,14 +535,20 @@ class HomieProxyServer:
         default_config = {
             "instances": {
                 "default": {
-                    "access_mode": "both",
+                    "allowed_networks_out": "both",
                     "tokens": ["your-secret-token-here"],
-                    "allowed_cidrs": []
+                    "restrict_access_to_cidrs": []
                 },
-                "internal": {
-                    "access_mode": "local",
+                "internal-only": {
+                    "allowed_networks_out": "internal",
                     "tokens": [],
-                    "allowed_cidrs": ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
+                    "restrict_access_to_cidrs": []
+                },
+                "custom-networks": {
+                    "allowed_networks_out": "both",
+                    "allowed_networks_out_cidrs": ["8.8.8.0/24", "1.1.1.0/24"],
+                    "tokens": ["custom-token"],
+                    "restrict_access_to_cidrs": []
                 }
             }
         }

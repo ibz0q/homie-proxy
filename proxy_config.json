@@ -1,21 +1,37 @@
 {
-  "clear_cache_on_start": true,
   "instances": {
-    "default": {
-      "access_mode": "both",
+    "restricted-out": {
+      "allowed_networks_out": "both",
+      "allowed_networks_out_cidrs": ["1.1.1.1/32"],
       "tokens": [
         "your-secret-token-here"
       ],
-      "allowed_cidrs": []
+      "restrict_access_to_cidrs": ["192.168.1.0/24", "10.0.0.0/8"]
     },
-    "internal": {
-      "access_mode": "local",
+    "external-only": {
+      "allowed_networks_out": "external",
+      "tokens": [
+        "external-token-123"
+      ],
+      "restrict_access_to_cidrs": ["192.168.1.0/24", "10.0.0.0/8"]
+    },
+    "internal-only": {
+      "allowed_networks_out": "internal",
       "tokens": [],
-      "allowed_cidrs": [
-        "192.168.0.0/16",
-        "10.0.0.0/8",
-        "172.16.0.0/12"
-      ]
+      "restrict_access_to_cidrs": []
+    },
+    "custom-networks": {
+      "allowed_networks_out": "both",
+      "allowed_networks_out_cidrs": ["8.8.8.0/24", "1.1.1.0/24", "192.168.0.0/16"],
+      "tokens": ["custom-token"],
+      "restrict_access_to_cidrs": []
+    },
+    "default": {
+      "allowed_networks_out": "both",
+      "tokens": [
+        "your-secret-token-here"
+      ],
+      "restrict_access_to_cidrs": []
     }
   }
 }

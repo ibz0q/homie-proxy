@@ -1,6 +1,6 @@
-# Homie Reverse Proxy
+# Homie Proxy
 
-A lightweight, configurable HTTP reverse proxy server with authentication, TLS bypass capabilities, and robust connection handling.
+A lightweight, configurable HTTP proxy server with authentication, TLS bypass capabilities, and robust connection handling.
 
 ## ✨ Features
 
@@ -8,7 +8,6 @@ A lightweight, configurable HTTP reverse proxy server with authentication, TLS b
 - **TLS error bypassing** for development and testing
 - **Host header manipulation** for virtual host compatibility  
 - **Request/response header modification**
-- **Platform-agnostic** connection error handling
 - **Concurrent request handling** with threading
 - **Docker support** for consistent deployment
 
@@ -25,7 +24,7 @@ docker build -t homie-proxy .
 docker run -p 8080:8080 -v $(pwd)/proxy_config.json:/app/proxy_config.json:ro homie-proxy
 ```
 
-### Method 2: Direct Python
+### Method 2: Direct Python (Not Recommended - Use Linux or Docker)
 
 ```bash
 # Install dependencies
@@ -39,7 +38,6 @@ python homie_proxy.py --host 0.0.0.0 --port 8080
 
 Running in Docker Linux provides several advantages:
 
-- **No Windows-specific errors** (eliminates WinError 10053/10054 issues)
 - **Consistent behavior** across all environments
 - **Production-ready** networking stack
 - **Easy scaling** and deployment
@@ -57,35 +55,28 @@ services:
     restart: unless-stopped
 ```
 
-## 🔧 Platform-Agnostic Error Handling
-
-The proxy now handles connection aborts gracefully across all platforms:
-
-- **Windows**: WinError 10053, 10054, 10055, 10056
-- **Linux**: EPIPE (32), ECONNRESET (104), ETIMEDOUT (110), ECONNREFUSED (111)  
-- **macOS**: Connection reset (54), Connection refused (61)
-- **Pattern matching**: Detects connection errors by message content
-
 ## 📖 Usage Examples
 
-### Basic Proxy Request
-```bash
-curl "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get"
 ```
+# Basic proxy request
+http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get
 
-### TLS Bypass
-```bash
-curl "http://localhost:8080/default?token=your-secret-token-here&url=https://self-signed.badssl.com&skip_tls_checks=all"
-```
+# TLS bypass for self-signed certificates
+http://localhost:8080/default?token=your-secret-token-here&url=https://self-signed.badssl.com&skip_tls_checks=true
 
-### Host Header Override
-```bash
-curl "http://localhost:8080/default?token=your-secret-token-here&url=https://1.1.1.1&override_host_header=one.one.one.one&skip_tls_checks=all"
-```
+# Custom request headers
+http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/headers&request_headers[User-Agent]=CustomBot/1.0
 
-### Custom Headers
-```bash
-curl "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/headers&request_headers[User-Agent]=CustomBot/1.0&response_header[Access-Control-Allow-Origin]=*"
+# Custom response headers (CORS)
+http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get&response_header[Access-Control-Allow-Origin]=*
+
+# POST request with JSON data
+curl -X POST "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/post" \
+     -H "Content-Type: application/json" \
+     -d '{"test": "data"}'
+
+# Host header override for IP addresses
+http://localhost:8080/default?token=your-secret-token-here&url=https://1.1.1.1&override_host_header=one.one.one.one&skip_tls_checks=true
 ```
 
 ## 📁 Configuration
@@ -96,25 +87,61 @@ Edit `proxy_config.json`:
 {
   "instances": {
     "default": {
-      "access_mode": "both",
+      "allowed_networks_out": "both",
       "tokens": ["your-secret-token-here"],
-      "allowed_cidrs": []
+      "restrict_access_to_cidrs": []
     },
-    "internal": {
-      "access_mode": "local", 
+    "external-only": {
+      "allowed_networks_out": "external",
+      "tokens": ["external-token-123"],
+      "restrict_access_to_cidrs": ["192.168.1.0/24", "10.0.0.0/8"]
+    },
+    "internal-only": {
+      "allowed_networks_out": "internal", 
       "tokens": [],
-      "allowed_cidrs": ["192.168.0.0/16", "10.0.0.0/8"]
+      "restrict_access_to_cidrs": []
+    },
+    "custom-networks": {
+      "allowed_networks_out": "both",
+      "allowed_networks_out_cidrs": ["8.8.8.0/24", "1.1.1.0/24", "192.168.0.0/16"],
+      "tokens": ["custom-token"],
+      "restrict_access_to_cidrs": []
     }
   }
 }
 ```
 
+### Configuration Options
+
+**`allowed_networks_out`** - Controls which target networks the proxy can reach:
+- `"external"`: Only external/public IPs (denies private/internal IPs like 192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+- `"internal"`: Only internal/private IPs (allows only 192.168.x.x, 10.x.x.x, 172.16-31.x.x, 127.x.x.x)  
+- `"both"`: Allow all IPs (0.0.0.0/0 - no restrictions)
+
+**`allowed_networks_out_cidrs`** - Specific CIDR ranges for outbound access:
+- If specified: Only allow requests to these specific CIDR ranges (overrides `allowed_networks_out`)
+- If empty/not specified: Use `allowed_networks_out` mode
+- Provides fine-grained control over exactly which networks can be accessed
+
+**`restrict_access_to_cidrs`** - Controls which client IPs can access this proxy instance:
+- If specified: Only allow requests from these CIDR ranges
+- If empty/not specified: Only allow local IPs (127.0.0.1, private networks)
+
+**`tokens`** - Authentication tokens required for this instance:
+- If empty: No authentication required
+- If specified: Must provide valid token in `?token=` parameter
+
+### Example Use Cases
+
+- **`custom-networks`**: Allow access only to specific services (DNS servers, specific subnets)
+- **`external-only`**: Block access to internal networks (prevent SSRF attacks)
+- **`internal-only`**: Only allow access to internal services (development/testing)
+
 ## 🛠 Development
 
 ### Running Tests
 ```bash
-python test_winerror_fix.py
-python tests/test_simple.py
+python run_all_tests.py
 ```
 
 ### Local Development
@@ -129,12 +156,11 @@ python homie_proxy.py --host 127.0.0.1 --port 8080
 ## 🔍 Troubleshooting
 
 ### Connection Issues
-- **Windows**: WinError 10053 errors are now handled gracefully
-- **Docker**: Use Linux containers to avoid Windows networking quirks
+- **Docker**: Use Linux containers for best performance
 - **Ports**: Ensure port 8080 isn't already in use
 
 ### TLS Issues  
-- Use `skip_tls_checks=all` for development
+- Use `skip_tls_checks=true` for development
 - Verify target server TLS configuration
 - Check certificate validity dates
 
@@ -142,13 +168,13 @@ python homie_proxy.py --host 127.0.0.1 --port 8080
 
 - Python 3.8+
 - `requests` library
-- Docker (optional, recommended)
+- Docker (recommended)
 
 ## 🤝 Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Test on multiple platforms (Windows, Linux, macOS)
+3. Test with Docker
 4. Submit a pull request
 
 ## 📄 License

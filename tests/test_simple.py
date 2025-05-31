@@ -9,20 +9,30 @@ parser = argparse.ArgumentParser(description='Test reverse proxy basic functiona
 parser.add_argument('--port', type=int, 
                    default=int(os.environ.get('PROXY_PORT', 8080)),
                    help='Proxy server port (default: 8080, or PROXY_PORT env var)')
+parser.add_argument('--mode', choices=['standalone', 'ha'], default='standalone',
+                   help='Test mode: standalone proxy or Home Assistant integration (default: standalone)')
+parser.add_argument('--instance', default='external-api-route',
+                   help='HA integration instance name (default: external-api-route)')
 args = parser.parse_args()
 
 print("=" * 60)
-print("SIMPLE BASIC TEST - REVERSE PROXY")
+print(f"SIMPLE BASIC TEST - REVERSE PROXY ({args.mode.upper()})")
 print("=" * 60)
 
-base_url = f"http://localhost:{args.port}/default?token=your-secret-token-here"
+# Construct base URL based on mode
+if args.mode == 'ha':
+    base_url = f"http://localhost:{args.port}/api/homie_proxy/{args.instance}"
+    token_param = ""  # HA integration has auth disabled for testing
+else:
+    base_url = f"http://localhost:{args.port}/default"
+    token_param = "token=your-secret-token-here&"
 
-print(f"\nTesting proxy at localhost:{args.port}")
+print(f"\nTesting proxy at localhost:{args.port} ({args.mode} mode)")
 print("-" * 50)
 
 # Test 1: Simple GET request
 print("\nTest 1: Basic GET request")
-test_url = f"{base_url}&url=https://httpbin.org/get"
+test_url = f"{base_url}?{token_param}url=https://httpbin.org/get"
 
 try:
     print("Making request...")
@@ -42,7 +52,7 @@ except Exception as e:
 
 # Test 2: Host header check
 print("\nTest 2: Host header verification")
-test_url2 = f"{base_url}&url=https://httpbin.org/headers"
+test_url2 = f"{base_url}?{token_param}url=https://httpbin.org/headers"
 
 try:
     print("Making headers request...")

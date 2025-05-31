@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Add HomieProxy",
+        "title": "Add HomieProxy Instance",
         "description": "Set up a new HTTP proxy endpoint with access controls. A secure token will be automatically generated.",
         "data": {
           "name": "Endpoint Name",

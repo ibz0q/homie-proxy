@@ -1,23 +1,474 @@
-"""Homie Proxy service for Home Assistant integration."""
+"""Homie Proxy service for Home Assistant integration - using standalone proxy code."""
 
 import logging
 import ipaddress
 import socket
 import ssl
 import json
+import urllib.parse
+import select
+import time
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from urllib.parse import urlparse, parse_qs
-from aiohttp import web, ClientSession, ClientTimeout, ClientError, ClientConnectorError
-from aiohttp.web_request import Request
-from aiohttp.connector import TCPConnector
+from http.server import BaseHTTPRequestHandler
+from io import BytesIO
+
+try:
+    import requests
+    from requests.adapters import HTTPAdapter
+    import urllib3
+    from urllib3.exceptions import InsecureRequestWarning
+    # Note: SubjectAltNameWarning may not exist in newer urllib3 versions
+    try:
+        from urllib3.exceptions import SubjectAltNameWarning
+    except ImportError:
+        SubjectAltNameWarning = None
+except ImportError:
+    raise ImportError("'requests' library is required for HomieProxy")
 
 from homeassistant.core import HomeAssistant
 from homeassistant.components.http import HomeAssistantView
+from aiohttp import web
+from aiohttp.web_request import Request
 
 from .const import PRIVATE_CIDRS, LOCAL_CIDRS
 
 _LOGGER = logging.getLogger(__name__)
+
+# Global registry to track all instances
+_HOMIE_PROXY_INSTANCES = {}
+
+
+class CustomHTTPSAdapter(HTTPAdapter):
+    """Custom HTTPS adapter that allows selective TLS error ignoring"""
+    
+    def __init__(self, skip_tls_checks=None, *args, **kwargs):
+        self.skip_tls_checks = skip_tls_checks or []
+        super().__init__(*args, **kwargs)
+    
+    def init_poolmanager(self, *args, **kwargs):
+        # Configure SSL context based on ignored errors
+        ssl_context = ssl.create_default_context()
+        
+        # Check for ALL option - disables all TLS verification
+        if 'all' in [error.lower() for error in self.skip_tls_checks]:
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            kwargs['ssl_context'] = ssl_context
+            # Suppress all urllib3 warnings for ALL option
+            urllib3.disable_warnings(InsecureRequestWarning)
+            if SubjectAltNameWarning is not None:
+                urllib3.disable_warnings(SubjectAltNameWarning)
+        else:
+            # Handle specific TLS error types
+            if 'expired_cert' in self.skip_tls_checks:
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            elif 'self_signed' in self.skip_tls_checks:
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            elif 'hostname_mismatch' in self.skip_tls_checks:
+                ssl_context.check_hostname = False
+            elif 'cert_authority' in self.skip_tls_checks:
+                ssl_context.verify_mode = ssl.CERT_NONE
+            elif 'weak_cipher' in self.skip_tls_checks:
+                ssl_context.set_ciphers('ALL:@SECLEVEL=0')
+            
+            # If any TLS errors should be ignored, apply the configuration
+            if self.skip_tls_checks:
+                kwargs['ssl_context'] = ssl_context
+                # Suppress specific urllib3 warnings
+                if 'expired_cert' in self.skip_tls_checks or 'self_signed' in self.skip_tls_checks:
+                    urllib3.disable_warnings(InsecureRequestWarning)
+                if 'hostname_mismatch' in self.skip_tls_checks and SubjectAltNameWarning is not None:
+                    urllib3.disable_warnings(SubjectAltNameWarning)
+        
+        return super().init_poolmanager(*args, **kwargs)
+
+
+class ProxyInstance:
+    """Configuration for a proxy instance"""
+    
+    def __init__(self, name: str, tokens: List[str], restrict_out: str, restrict_in: Optional[str] = None):
+        self.name = name
+        self.restrict_out = restrict_out
+        self.restrict_out_cidrs = []
+        self.tokens = set(tokens)
+        self.restrict_in_cidrs = []
+        
+        # Handle custom CIDR for restrict_out
+        if restrict_out not in ['any', 'external', 'internal']:
+            try:
+                self.restrict_out_cidrs = [ipaddress.ip_network(restrict_out, strict=False)]
+                self.restrict_out = 'custom'
+            except ValueError:
+                _LOGGER.warning("Invalid restrict_out CIDR: %s, defaulting to 'any'", restrict_out)
+                self.restrict_out = 'any'
+        
+        # Handle restrict_in CIDR
+        if restrict_in:
+            try:
+                self.restrict_in_cidrs = [ipaddress.ip_network(restrict_in, strict=False)]
+            except ValueError:
+                _LOGGER.warning("Invalid restrict_in CIDR: %s, ignoring", restrict_in)
+                self.restrict_in_cidrs = []
+    
+    def is_client_access_allowed(self, client_ip: str) -> bool:
+        """Check if client IP is allowed to access this proxy instance"""
+        if not self.restrict_in_cidrs:
+            return True  # No restrictions = allow all
+            
+        try:
+            client_addr = ipaddress.ip_address(client_ip)
+            return any(client_addr in cidr for cidr in self.restrict_in_cidrs)
+        except (ipaddress.AddressValueError, ValueError):
+            return False
+    
+    def is_target_url_allowed(self, target_url: str) -> bool:
+        """Check if the target URL is allowed based on network access configuration"""
+        try:
+            parsed_url = urllib.parse.urlparse(target_url)
+            hostname = parsed_url.hostname
+            
+            if not hostname:
+                return False
+            
+            # Resolve hostname to IP for checking
+            try:
+                # For IP addresses, use directly
+                target_ip = ipaddress.ip_address(hostname)
+            except ValueError:
+                # For hostnames, resolve to IP
+                try:
+                    resolved_ip = socket.gethostbyname(hostname)
+                    target_ip = ipaddress.ip_address(resolved_ip)
+                except (socket.gaierror, ValueError):
+                    # If resolution fails, deny access for safety
+                    return False
+            
+            # If restrict_out_cidrs is specified, use it (custom CIDR mode)
+            if self.restrict_out_cidrs:
+                return any(target_ip in cidr for cidr in self.restrict_out_cidrs)
+            
+            # Otherwise, use restrict_out mode
+            if self.restrict_out == 'external':
+                # Only allow external (non-private) IPs - use const.py definitions
+                return not any(target_ip in ipaddress.ip_network(cidr) for cidr in PRIVATE_CIDRS)
+            elif self.restrict_out == 'internal':
+                # Only allow internal (private) IPs - use const.py definitions  
+                return any(target_ip in ipaddress.ip_network(cidr) for cidr in PRIVATE_CIDRS)
+            else:  # any
+                # Allow everything (0.0.0.0/0)
+                return True
+                
+        except Exception:
+            # If anything goes wrong, deny access for safety
+            return False
+    
+    def is_token_valid(self, token: str) -> bool:
+        """Check if provided token is valid"""
+        if not self.tokens:
+            return True  # No tokens required
+        return token in self.tokens
+
+
+class HomieProxyRequestHandler:
+    """Request handler that mimics BaseHTTPRequestHandler but works with aiohttp"""
+    
+    def __init__(self, proxy_instance: ProxyInstance):
+        self.proxy_instance = proxy_instance
+    
+    def log_message(self, format_str, *args):
+        """Log a message with timestamp"""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        _LOGGER.info(f"[{timestamp}] {format_str % args}")
+    
+    def get_client_ip(self, request: Request) -> str:
+        """Get the real client IP address"""
+        # Check for forwarded headers first
+        forwarded_for = request.headers.get('X-Forwarded-For')
+        if forwarded_for:
+            return forwarded_for.split(',')[0].strip()
+        
+        real_ip = request.headers.get('X-Real-IP')
+        if real_ip:
+            return real_ip
+        
+        return request.remote or '127.0.0.1'
+    
+    def send_error_response(self, code: int, message: str) -> web.Response:
+        """Send an error response"""
+        error_response = {
+            'error': message,
+            'code': code,
+            'timestamp': datetime.now().isoformat(),
+            'instance': self.proxy_instance.name
+        }
+        return web.Response(
+            text=json.dumps(error_response, indent=2),
+            status=code,
+            headers={'Content-Type': 'application/json'}
+        )
+    
+    async def handle_request(self, request: Request, method: str) -> web.Response:
+        """Main request handler - uses method parameter for HTTP method"""
+        try:
+            client_ip = self.get_client_ip(request)
+            
+            # Check IP access
+            if not self.proxy_instance.is_client_access_allowed(client_ip):
+                self.log_message(f"Client IP access denied: {client_ip} not allowed for instance '{self.proxy_instance.name}'")
+                if self.proxy_instance.restrict_in_cidrs:
+                    allowed_cidrs_str = ', '.join(str(cidr) for cidr in self.proxy_instance.restrict_in_cidrs)
+                    self.log_message(f"Instance allowed CIDRs: {allowed_cidrs_str}")
+                else:
+                    self.log_message("Instance has no restrict_in_cidrs specified - allowing all IPs (0.0.0.0/0)")
+                return self.send_error_response(403, "Access denied from your IP")
+            
+            self.log_message(f"Client IP access allowed: {client_ip} for instance '{self.proxy_instance.name}'")
+            
+            # Parse query parameters
+            query_params = dict(request.query)
+            # Convert single values to lists for compatibility with standalone code
+            for key, value in query_params.items():
+                if isinstance(value, str):
+                    query_params[key] = [value]
+            
+            # Get target URL
+            target_urls = query_params.get('url', [])
+            if not target_urls:
+                return self.send_error_response(400, "Target URL required")
+            
+            target_url = target_urls[0]
+            
+            # Check target URL access
+            if not self.proxy_instance.is_target_url_allowed(target_url):
+                if self.proxy_instance.restrict_out_cidrs:
+                    cidrs_str = ', '.join(str(cidr) for cidr in self.proxy_instance.restrict_out_cidrs)
+                    self.log_message(f"Target URL access denied: {target_url} not in restrict_out_cidrs '{cidrs_str}'")
+                else:
+                    self.log_message(f"Target URL access denied: {target_url} not allowed for restrict_out '{self.proxy_instance.restrict_out}'")
+                return self.send_error_response(403, "Access denied to the target URL")
+            
+            if self.proxy_instance.restrict_out_cidrs:
+                cidrs_str = ', '.join(str(cidr) for cidr in self.proxy_instance.restrict_out_cidrs)
+                self.log_message(f"Target URL access allowed: {target_url} matches restrict_out_cidrs '{cidrs_str}'")
+            else:
+                self.log_message(f"Target URL access allowed: {target_url} for restrict_out '{self.proxy_instance.restrict_out}'")
+            
+            # Check authentication
+            tokens = query_params.get('token', [])
+            token = tokens[0] if tokens else None
+            
+            # TEMPORARY: Allow unauthenticated access for testing
+            # if not self.proxy_instance.is_token_valid(token):
+            #     return self.send_error_response(401, "Invalid or missing token")
+            
+            # Get request body for methods that might have a body
+            body = None
+            if method in ['POST', 'PUT', 'PATCH']:
+                try:
+                    body = await request.read()
+                except Exception as e:
+                    _LOGGER.error("Failed to read request body: %s", e)
+                    return self.send_error_response(400, "Failed to read request body")
+            
+            # Prepare request session
+            session = requests.Session()
+            
+            # Clear any default User-Agent from the session
+            session.headers.pop('User-Agent', None)
+            
+            # Configure TLS error handling
+            skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
+            if skip_tls_checks_param[0]:
+                skip_tls_value = skip_tls_checks_param[0].lower()
+                
+                # Handle boolean-style values (true/false) and convert to 'all'
+                if skip_tls_value in ['true', '1', 'yes']:
+                    skip_tls_checks = ['all']
+                    self.log_message("TLS parameter 'true' detected, ignoring ALL TLS errors")
+                else:
+                    # Parse comma-separated list of TLS errors to ignore
+                    skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
+                
+                # Check for ALL option - completely disable TLS verification
+                if 'all' in skip_tls_checks:
+                    session.verify = False
+                    urllib3.disable_warnings(InsecureRequestWarning)
+                    if SubjectAltNameWarning is not None:
+                        urllib3.disable_warnings(SubjectAltNameWarning)
+                    self.log_message("Ignoring ALL TLS errors - complete TLS verification disabled")
+                else:
+                    # Mount custom HTTPS adapter for specific error types
+                    https_adapter = CustomHTTPSAdapter(skip_tls_checks=skip_tls_checks)
+                    session.mount('https://', https_adapter)
+                    self.log_message(f"Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
+            
+            # Configure redirect following
+            follow_redirects_param = query_params.get('follow_redirects', ['false'])
+            follow_redirects = follow_redirects_param[0].lower() in ['true', '1', 'yes']
+            if follow_redirects:
+                self.log_message("Redirect following enabled")
+            else:
+                self.log_message("Redirect following disabled (default)")
+            
+            # Handle Host header override logic
+            override_host_header_param = query_params.get('override_host_header', [''])
+            override_host_header = override_host_header_param[0] if override_host_header_param[0] else None
+            
+            # Parse target URL for hostname
+            parsed_target = urllib.parse.urlparse(target_url)
+            original_hostname = parsed_target.hostname
+            
+            # Prepare headers - start with original headers from client
+            headers = dict(request.headers)
+            
+            # Add custom request headers first (so they can override defaults)
+            for key, values in query_params.items():
+                if key.startswith('request_headers[') and key.endswith(']'):
+                    header_name = key[16:-1]  # Remove 'request_headers[' and ']'
+                    headers[header_name] = values[0]
+            
+            # Handle Host header logic AFTER custom headers so override takes precedence
+            if override_host_header:
+                # Use explicit override
+                headers['Host'] = override_host_header
+                self.log_message(f"Override Host header set to: {override_host_header}")
+            elif original_hostname:
+                # Check if the hostname is an IP address
+                try:
+                    ipaddress.ip_address(original_hostname)
+                    # It's an IP address - don't set Host header
+                    headers.pop('Host', None)
+                    self.log_message(f"Target is IP address ({original_hostname}) - no Host header set")
+                except ValueError:
+                    # It's a hostname - set Host header to hostname only (no port)
+                    headers['Host'] = original_hostname
+                    self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
+            
+            # Always ensure User-Agent is explicitly set (use blank if none provided)
+            user_agent_set = False
+            for header_name in headers.keys():
+                if header_name.lower() == 'user-agent':
+                    user_agent_set = True
+                    break
+            
+            if not user_agent_set:
+                headers['User-Agent'] = ''
+                self.log_message("Setting blank User-Agent (no User-Agent provided)")
+            else:
+                self.log_message(f"User-Agent already provided: {headers.get('User-Agent', headers.get('user-agent', 'NOT FOUND'))}")
+            
+            # Make the request
+            request_kwargs = {
+                'method': method,
+                'url': target_url,
+                'headers': headers,
+                'stream': True,
+                'timeout': 30,
+                'allow_redirects': follow_redirects
+            }
+            
+            # Add body for methods that support it
+            if body is not None:
+                request_kwargs['data'] = body
+            
+            # Log the request headers being sent to target URL
+            self.log_message(f"REQUEST to {target_url}")
+            self.log_message(f"Request method: {method}")
+            if headers:
+                self.log_message("Request headers being sent to target:")
+                for header_name, header_value in headers.items():
+                    # Truncate very long header values for readability
+                    if len(str(header_value)) > 100:
+                        display_value = str(header_value)[:97] + "..."
+                    else:
+                        display_value = header_value
+                    self.log_message(f"  {header_name}: {display_value}")
+            else:
+                self.log_message("No custom headers being sent to target")
+            
+            if body:
+                body_size = len(body)
+                if body_size > 1024:
+                    self.log_message(f"Request body: {body_size} bytes")
+                else:
+                    self.log_message(f"Request body: {body_size} bytes - {body[:100]}{'...' if len(body) > 100 else ''}")
+            
+            try:
+                response = session.request(**request_kwargs)
+                
+                # Log the response headers received from target
+                self.log_message(f"RESPONSE from {target_url}")
+                self.log_message(f"Response status: {response.status_code}")
+                if response.headers:
+                    self.log_message("Response headers received from target:")
+                    for header_name, header_value in response.headers.items():
+                        # Truncate very long header values for readability
+                        if len(str(header_value)) > 100:
+                            display_value = str(header_value)[:97] + "..."
+                        else:
+                            display_value = header_value
+                        self.log_message(f"  {header_name}: {display_value}")
+                else:
+                    self.log_message("No response headers received from target")
+                
+                # Prepare response headers - pass through all headers from target
+                response_headers = {}
+                excluded_response_headers = {
+                    'connection', 'transfer-encoding', 'content-encoding'
+                }
+                
+                for header, value in response.headers.items():
+                    if header.lower() not in excluded_response_headers:
+                        response_headers[header] = value
+                
+                # Add custom response headers
+                for key, values in query_params.items():
+                    if key.startswith('response_header[') and key.endswith(']'):
+                        header_name = key[16:-1]  # Remove 'response_header[' and ']'
+                        response_headers[header_name] = values[0]
+                
+                # Stream response data directly
+                self.log_message("Streaming response directly")
+                content_chunks = []
+                bytes_transferred = 0
+                
+                try:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            content_chunks.append(chunk)
+                            bytes_transferred += len(chunk)
+                
+                    content = b''.join(content_chunks)
+                    self.log_message(f"Streamed {bytes_transferred} bytes successfully")
+                    
+                    return web.Response(
+                        body=content,
+                        status=response.status_code,
+                        headers=response_headers
+                    )
+                        
+                except Exception as stream_error:
+                    self.log_message(f"Streaming error: {stream_error}")
+                    return self.send_error_response(502, f"Streaming error: {str(stream_error)}")
+                
+            except requests.exceptions.RequestException as e:
+                self.log_message(f"Request error: {e}")
+                return self.send_error_response(502, f"Bad Gateway: {str(e)}")
+                    
+            except OSError as e:
+                self.log_message(f"OS error: {e}")
+                return self.send_error_response(500, "Internal server error")
+            
+            finally:
+                # Always close the session to prevent connection pooling issues
+                session.close()
+            
+        except Exception as e:
+            self.log_message(f"Proxy error: {e}")
+            return self.send_error_response(500, "Internal server error")
 
 
 class HomieProxyService:
@@ -38,18 +489,32 @@ class HomieProxyService:
         self.restrict_out = restrict_out
         self.restrict_in = restrict_in
         self.view: Optional[HomieProxyView] = None
+        self.proxy_instance: Optional[ProxyInstance] = None
 
     async def setup(self):
         """Set up the proxy service."""
         _LOGGER.info("Setting up Homie Proxy service: %s", self.name)
         
-        # Create and register the HTTP view
-        self.view = HomieProxyView(
+        # Create proxy instance using standalone proxy logic
+        self.proxy_instance = ProxyInstance(
             name=self.name,
             tokens=self.tokens,
             restrict_out=self.restrict_out,
-            restrict_in=self.restrict_in,
+            restrict_in=self.restrict_in
         )
+        
+        # Register this instance in the global registry
+        _HOMIE_PROXY_INSTANCES[self.name] = self
+        
+        # Register debug view once (only for the first instance)
+        if len(_HOMIE_PROXY_INSTANCES) == 1:
+            debug_view = HomieProxyDebugView()
+            debug_view.hass = self.hass
+            self.hass.http.register_view(debug_view)
+            _LOGGER.info("Registered HomieProxy debug endpoint at /api/homie_proxy/debug")
+        
+        # Create and register the HTTP view
+        self.view = HomieProxyView(proxy_instance=self.proxy_instance)
         self.view.hass = self.hass
         self.hass.http.register_view(self.view)
         
@@ -64,10 +529,29 @@ class HomieProxyService:
         self.restrict_out = restrict_out
         self.restrict_in = restrict_in
         
-        if self.view:
-            self.view.tokens = tokens
-            self.view.restrict_out = restrict_out
-            self.view.restrict_in = restrict_in
+        # Update the proxy instance
+        if self.proxy_instance:
+            self.proxy_instance.tokens = set(tokens)
+            self.proxy_instance.restrict_out = restrict_out
+            
+            # Handle custom CIDR for restrict_out
+            self.proxy_instance.restrict_out_cidrs = []
+            if restrict_out not in ['any', 'external', 'internal']:
+                try:
+                    self.proxy_instance.restrict_out_cidrs = [ipaddress.ip_network(restrict_out, strict=False)]
+                    self.proxy_instance.restrict_out = 'custom'
+                except ValueError:
+                    _LOGGER.warning("Invalid restrict_out CIDR: %s, defaulting to 'any'", restrict_out)
+                    self.proxy_instance.restrict_out = 'any'
+            
+            # Handle restrict_in CIDR
+            self.proxy_instance.restrict_in_cidrs = []
+            if restrict_in:
+                try:
+                    self.proxy_instance.restrict_in_cidrs = [ipaddress.ip_network(restrict_in, strict=False)]
+                except ValueError:
+                    _LOGGER.warning("Invalid restrict_in CIDR: %s, ignoring", restrict_in)
+                    self.proxy_instance.restrict_in_cidrs = []
             
         _LOGGER.info(
             "Updated Homie Proxy service '%s' with %d token(s)", 
@@ -77,370 +561,97 @@ class HomieProxyService:
     async def cleanup(self):
         """Clean up the proxy service."""
         _LOGGER.info("Cleaning up Homie Proxy service: %s", self.name)
+        
+        # Remove from global registry
+        _HOMIE_PROXY_INSTANCES.pop(self.name, None)
+        
         # Note: Home Assistant doesn't provide a way to unregister views
         # The view will be cleaned up when HA restarts
 
 
 class HomieProxyView(HomeAssistantView):
-    """HTTP view for Homie Proxy."""
+    """HTTP view for Homie Proxy using standalone proxy code."""
 
-    def __init__(self, name: str, tokens: List[str], restrict_out: str, restrict_in: Optional[str] = None):
+    def __init__(self, proxy_instance: ProxyInstance):
         """Initialize the view."""
-        self.proxy_name = name
-        self.tokens = tokens
-        self.restrict_out = restrict_out
-        self.restrict_in = restrict_in
+        self.proxy_instance = proxy_instance
+        self.handler = HomieProxyRequestHandler(proxy_instance)
         
         # Set view properties
-        self.url = f"/api/homie_proxy/{name}"
-        self.name = f"api:homie_proxy:{name}"
+        self.url = f"/api/homie_proxy/{proxy_instance.name}"
+        self.name = f"api:homie_proxy:{proxy_instance.name}"
         self.requires_auth = False  # We handle auth with tokens
-
-    def _check_token(self, request: Request) -> bool:
-        """Check if the request has a valid token."""
-        token = request.query.get("token")
-        if not self.tokens:
-            return True  # No tokens required
-        return token is not None and token in self.tokens
-
-    def _get_client_ip(self, request: Request) -> str:
-        """Get the client IP address."""
-        # Check for forwarded headers first
-        forwarded_for = request.headers.get("X-Forwarded-For")
-        if forwarded_for:
-            return forwarded_for.split(",")[0].strip()
-        
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip:
-            return real_ip
-        
-        # Fall back to remote address
-        return request.remote
-
-    def _is_ip_allowed_in(self, client_ip: str) -> bool:
-        """Check if client IP is allowed to access this proxy."""
-        if not self.restrict_in:
-            return True  # No restriction
-        
-        try:
-            client_addr = ipaddress.ip_address(client_ip)
-            allowed_network = ipaddress.ip_network(self.restrict_in, strict=False)
-            return client_addr in allowed_network
-        except (ipaddress.AddressValueError, ValueError) as e:
-            _LOGGER.warning("Invalid IP address or network: %s", e)
-            return False
-
-    def _is_destination_allowed(self, url: str) -> bool:
-        """Check if the destination URL is allowed."""
-        if self.restrict_out == "any":
-            return True
-        
-        try:
-            # Extract hostname from URL
-            if "://" not in url:
-                url = "http://" + url
-            
-            parsed = urlparse(url)
-            hostname = parsed.hostname
-            
-            if not hostname:
-                return False
-            
-            # Resolve to IP and check against restrictions
-            try:
-                ip = socket.gethostbyname(hostname)
-                target_addr = ipaddress.ip_address(ip)
-            except (socket.gaierror, ipaddress.AddressValueError):
-                return False
-            
-            # Check against restriction rules
-            if self.restrict_out == "external":
-                # External networks only - NOT in private ranges
-                return not any(target_addr in ipaddress.ip_network(cidr) for cidr in PRIVATE_CIDRS)
-            elif self.restrict_out == "internal":
-                # Internal networks only - must be in private ranges
-                return any(target_addr in ipaddress.ip_network(cidr) for cidr in PRIVATE_CIDRS)
-            else:
-                # Custom CIDR
-                try:
-                    allowed_network = ipaddress.ip_network(self.restrict_out, strict=False)
-                    return target_addr in allowed_network
-                except ValueError:
-                    return False
-                    
-        except Exception as e:
-            _LOGGER.warning("Error checking destination %s: %s", url, e)
-            return False
-
-    def _parse_skip_tls_checks(self, query_params: Dict) -> List[str]:
-        """Parse skip_tls_checks parameter."""
-        skip_tls_param = query_params.get('skip_tls_checks', [''])
-        if not skip_tls_param[0]:
-            return []
-        
-        skip_tls_value = skip_tls_param[0].lower()
-        
-        # Handle boolean-style values
-        if skip_tls_value in ['true', '1', 'yes']:
-            _LOGGER.info("TLS parameter 'true' detected, ignoring ALL TLS errors")
-            return ['all']
-        
-        # Parse comma-separated list
-        skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
-        _LOGGER.info("Ignoring specific TLS errors: %s", ', '.join(skip_tls_checks))
-        return skip_tls_checks
-
-    def _create_ssl_context(self, skip_tls_checks: List[str]) -> Optional[ssl.SSLContext]:
-        """Create SSL context based on TLS error handling preferences."""
-        if not skip_tls_checks:
-            return None
-        
-        ssl_context = ssl.create_default_context()
-        
-        # Check for ALL option - disables all TLS verification
-        if 'all' in skip_tls_checks:
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            _LOGGER.info("Ignoring ALL TLS errors - complete TLS verification disabled")
-            return ssl_context
-        
-        # Handle specific TLS error types
-        if any(check in skip_tls_checks for check in ['expired_cert', 'self_signed', 'cert_authority']):
-            ssl_context.verify_mode = ssl.CERT_NONE
-        
-        if any(check in skip_tls_checks for check in ['hostname_mismatch', 'expired_cert', 'self_signed']):
-            ssl_context.check_hostname = False
-        
-        if 'weak_cipher' in skip_tls_checks:
-            try:
-                ssl_context.set_ciphers('ALL:@SECLEVEL=0')
-            except ssl.SSLError:
-                _LOGGER.warning("Could not set weak cipher support")
-        
-        return ssl_context
-
-    def _prepare_headers(self, request: Request, target_url: str, query_params: Dict) -> Dict[str, str]:
-        """Prepare headers for the outgoing request."""
-        headers = {}
-        excluded_headers = {
-            'connection', 'upgrade', 'proxy-authenticate', 
-            'proxy-authorization', 'te', 'trailers', 'transfer-encoding',
-            'host'  # We'll handle host separately
-        }
-        
-        # Copy headers excluding hop-by-hop headers
-        for key, value in request.headers.items():
-            if key.lower() not in excluded_headers:
-                headers[key] = value
-        
-        # Add custom request headers from query parameters
-        for key, values in query_params.items():
-            if key.startswith('request_headers[') and key.endswith(']'):
-                header_name = key[16:-1]  # Remove 'request_headers[' and ']'
-                headers[header_name] = values[0]
-                _LOGGER.debug("Added custom request header: %s = %s", header_name, values[0])
-        
-        # Handle Host header logic
-        override_host_header = query_params.get('override_host_header', [''])[0]
-        
-        try:
-            parsed_url = urlparse(target_url)
-            hostname = parsed_url.hostname
-            
-            if override_host_header:
-                # Use explicit override
-                headers['Host'] = override_host_header
-                _LOGGER.debug("Override Host header set to: %s", override_host_header)
-            elif hostname:
-                # Check if hostname is an IP address
-                try:
-                    ipaddress.ip_address(hostname)
-                    # It's an IP address - don't set Host header
-                    headers.pop('Host', None)
-                    _LOGGER.debug("Target is IP address (%s) - no Host header set", hostname)
-                except ValueError:
-                    # It's a hostname - set Host header
-                    headers['Host'] = hostname
-                    _LOGGER.debug("Fixed Host header to hostname: %s", headers['Host'])
-        except Exception as e:
-            _LOGGER.warning("Error handling Host header: %s", e)
-        
-        # Ensure User-Agent is explicitly set
-        user_agent_set = any(key.lower() == 'user-agent' for key in headers.keys())
-        if not user_agent_set:
-            headers['User-Agent'] = ''
-            _LOGGER.debug("Setting blank User-Agent (no User-Agent provided)")
-        
-        return headers
-
-    def _log_request_details(self, method: str, target_url: str, headers: Dict, body: Optional[bytes]):
-        """Log detailed request information."""
-        _LOGGER.info("REQUEST to %s", target_url)
-        _LOGGER.info("Request method: %s", method)
-        
-        if headers:
-            _LOGGER.debug("Request headers being sent to target:")
-            for header_name, header_value in headers.items():
-                # Truncate very long header values for readability
-                display_value = str(header_value)[:97] + "..." if len(str(header_value)) > 100 else header_value
-                _LOGGER.debug("  %s: %s", header_name, display_value)
-        
-        if body:
-            body_size = len(body)
-            if body_size > 1024:
-                _LOGGER.debug("Request body: %d bytes", body_size)
-            else:
-                body_preview = body[:100].decode('utf-8', errors='ignore')
-                _LOGGER.debug("Request body: %d bytes - %s%s", body_size, body_preview, '...' if len(body) > 100 else '')
-
-    def _log_response_details(self, response, target_url: str):
-        """Log detailed response information."""
-        _LOGGER.info("RESPONSE from %s", target_url)
-        _LOGGER.info("Response status: %d", response.status)
-        
-        if response.headers:
-            _LOGGER.debug("Response headers received from target:")
-            for header_name, header_value in response.headers.items():
-                display_value = str(header_value)[:97] + "..." if len(str(header_value)) > 100 else header_value
-                _LOGGER.debug("  %s: %s", header_name, display_value)
-
-    async def _make_request(self, method: str, url: str, headers: Dict, data: Optional[bytes], query_params: Dict):
-        """Make the actual HTTP request with all advanced features."""
-        # Parse configuration from query parameters
-        skip_tls_checks = self._parse_skip_tls_checks(query_params)
-        follow_redirects = query_params.get('follow_redirects', ['false'])[0].lower() in ['true', '1', 'yes']
-        
-        _LOGGER.debug("Redirect following: %s", "enabled" if follow_redirects else "disabled")
-        
-        # Create SSL context
-        ssl_context = self._create_ssl_context(skip_tls_checks)
-        
-        # Create connector with SSL configuration
-        connector = TCPConnector(ssl=ssl_context) if ssl_context else TCPConnector()
-        timeout = ClientTimeout(total=30)
-        
-        try:
-            async with ClientSession(timeout=timeout, connector=connector) as session:
-                # Log request details
-                self._log_request_details(method, url, headers, data)
-                
-                async with session.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    data=data,
-                    allow_redirects=follow_redirects
-                ) as response:
-                    # Log response details
-                    self._log_response_details(response, url)
-                    
-                    # Read response content with streaming
-                    content = await response.read()
-                    
-                    # Prepare response headers
-                    response_headers = {}
-                    excluded_response_headers = {
-                        'connection', 'transfer-encoding', 'content-encoding'
-                    }
-                    
-                    for key, value in response.headers.items():
-                        if key.lower() not in excluded_response_headers:
-                            response_headers[key] = value
-                    
-                    # Add custom response headers
-                    for key, values in query_params.items():
-                        if key.startswith('response_header[') and key.endswith(']'):
-                            header_name = key[16:-1]  # Remove 'response_header[' and ']'
-                            response_headers[header_name] = values[0]
-                            _LOGGER.debug("Added custom response header: %s = %s", header_name, values[0])
-                    
-                    _LOGGER.info("Transferred %d bytes successfully", len(content))
-                    
-                    return {
-                        'content': content,
-                        'status': response.status,
-                        'headers': response_headers,
-                        'content_type': response.headers.get('Content-Type', 'text/plain')
-                    }
-        finally:
-            await connector.close()
-
-    def _send_error_response(self, code: int, message: str) -> web.Response:
-        """Send a JSON error response."""
-        error_response = {
-            'error': message,
-            'code': code,
-            'timestamp': datetime.now().isoformat(),
-            'instance': self.proxy_name
-        }
-        return web.Response(
-            text=json.dumps(error_response, indent=2),
-            status=code,
-            headers={'Content-Type': 'application/json'}
-        )
 
     async def get(self, request: Request) -> web.Response:
         """Handle GET request."""
-        return await self._handle_request(request, "GET")
+        return await self.handler.handle_request(request, "GET")
 
     async def post(self, request: Request) -> web.Response:
         """Handle POST request."""
-        return await self._handle_request(request, "POST")
+        return await self.handler.handle_request(request, "POST")
 
-    async def _handle_request(self, request: Request, method: str) -> web.Response:
-        """Handle HTTP request of any method with full HomieProxy functionality."""
-        # Parse query parameters
-        query_params = {k: v for k, v in request.query.items()}
+    async def put(self, request: Request) -> web.Response:
+        """Handle PUT request."""
+        return await self.handler.handle_request(request, "PUT")
+
+    async def patch(self, request: Request) -> web.Response:
+        """Handle PATCH request."""
+        return await self.handler.handle_request(request, "PATCH")
+
+    async def delete(self, request: Request) -> web.Response:
+        """Handle DELETE request."""
+        return await self.handler.handle_request(request, "DELETE")
+
+    async def head(self, request: Request) -> web.Response:
+        """Handle HEAD request."""
+        return await self.handler.handle_request(request, "HEAD")
+
+    async def options(self, request: Request) -> web.Response:
+        """Handle OPTIONS request."""
+        return await self.handler.handle_request(request, "OPTIONS")
+
+
+class HomieProxyDebugView(HomeAssistantView):
+    """Debug view for HomieProxy showing all instances and configuration."""
+    
+    url = "/api/homie_proxy/debug"
+    name = "api:homie_proxy:debug"
+    requires_auth = False  # For debugging, but could be secured if needed
+    
+    async def get(self, request: Request) -> web.Response:
+        """Handle GET request for debug information."""
+        debug_info = {
+            "timestamp": datetime.now().isoformat(),
+            "instances": {}
+        }
         
-        # Check token
-        if not self._check_token(request):
-            return self._send_error_response(401, "Unauthorized: Invalid or missing token")
+        # Collect information about all instances
+        for instance_name, service in _HOMIE_PROXY_INSTANCES.items():
+            debug_info["instances"][instance_name] = {
+                "name": service.name,
+                "tokens": service.tokens,  # Show full tokens
+                "restrict_out": service.restrict_out,
+                "restrict_in": service.restrict_in,
+                "endpoint_url": f"/api/homie_proxy/{service.name}",
+                "status": "active" if service.view else "inactive"
+            }
         
-        # Check client IP restrictions
-        client_ip = self._get_client_ip(request)
-        if not self._is_ip_allowed_in(client_ip):
-            _LOGGER.warning("Client IP access denied: %s not allowed for instance '%s'", client_ip, self.proxy_name)
-            return self._send_error_response(403, f"Forbidden: Client IP {client_ip} not allowed")
+        # Add system information
+        debug_info["system"] = {
+            "private_cidrs": PRIVATE_CIDRS,
+            "local_cidrs": LOCAL_CIDRS,
+            "available_restrictions": ["any", "external", "internal", "custom"],
+            "proxy_implementation": "standalone_proxy_code"
+        }
         
-        _LOGGER.info("Client IP access allowed: %s for instance '%s'", client_ip, self.proxy_name)
+        # Format as pretty JSON
+        response_text = json.dumps(debug_info, indent=2, ensure_ascii=False)
         
-        # Get target URL
-        target_url = request.query.get("url")
-        if not target_url:
-            return self._send_error_response(400, "Bad Request: Missing 'url' parameter")
-        
-        # Check destination restrictions
-        if not self._is_destination_allowed(target_url):
-            _LOGGER.warning("Target URL access denied: %s not allowed for restrict_out '%s'", target_url, self.restrict_out)
-            return self._send_error_response(403, f"Forbidden: Destination {target_url} not allowed")
-        
-        _LOGGER.info("Target URL access allowed: %s for restrict_out '%s'", target_url, self.restrict_out)
-        
-        # Get request body for methods that might have one
-        data = None
-        if method in ['POST', 'PUT', 'PATCH']:
-            try:
-                data = await request.read()
-            except Exception as e:
-                _LOGGER.error("Failed to read request body: %s", e)
-                return self._send_error_response(400, "Bad Request: Failed to read body")
-        
-        # Prepare headers with all advanced features
-        headers = self._prepare_headers(request, target_url, query_params)
-        
-        # Make the proxied request with all features
-        try:
-            result = await self._make_request(method, target_url, headers, data, query_params)
-            
-            return web.Response(
-                body=result['content'],
-                status=result['status'],
-                headers=result['headers']
-            )
-            
-        except ClientError as e:
-            _LOGGER.error("Client error during proxy request: %s", e)
-            return self._send_error_response(502, f"Bad Gateway: {str(e)}")
-        except Exception as e:
-            _LOGGER.error("Proxy request failed: %s", e)
-            return self._send_error_response(502, f"Proxy Error: {str(e)}") 
+        return web.Response(
+            text=response_text,
+            content_type="application/json",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-cache"
+            }
+        ) 

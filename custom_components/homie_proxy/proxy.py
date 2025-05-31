@@ -251,37 +251,37 @@ def sync_proxy_request(proxy_instance: ProxyInstance, request_data: dict) -> dic
                     header_name = key[16:-1]  # Remove 'response_header[' and ']'
                     response_headers[header_name] = values[0]
             
-            # Stream response data directly using the same logic as standalone
-            content_chunks = []
-            bytes_transferred = 0
-            
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    content_chunks.append(chunk)
-                    bytes_transferred += len(chunk)
-            
-            content = b''.join(content_chunks)
-            _LOGGER.info(f"Streamed {bytes_transferred} bytes successfully")
-            
+            # Return response object for streaming - don't buffer content
             return {
                 'success': True,
-                'content': content,
+                'response': response,  # Return the response object itself
                 'status': response.status_code,
-                'headers': response_headers
+                'headers': response_headers,
+                'session': session  # Keep session alive for streaming
             }
                     
         except requests.exceptions.RequestException as e:
+            session.close()
             return {'success': False, 'error': f"Bad Gateway: {str(e)}", 'status': 502}
                 
         except OSError as e:
-            return {'success': False, 'error': "Internal server error", 'status': 500}
-        
-        finally:
-            # Always close the session to prevent connection pooling issues
             session.close()
+            return {'success': False, 'error': "Internal server error", 'status': 500}
         
     except Exception as e:
         return {'success': False, 'error': "Internal server error", 'status': 500}
+
+
+async def stream_response_content(response, session):
+    """Async generator to stream response content"""
+    try:
+        # Stream in 64KB chunks for better performance with large files
+        for chunk in response.iter_content(chunk_size=65536):
+            if chunk:
+                yield chunk
+    finally:
+        # Always close the session when streaming is done
+        session.close()
 
 
 class HomieProxyRequestHandler:
@@ -474,11 +474,45 @@ class HomieProxyRequestHandler:
             )
             
             if result['success']:
-                return web.Response(
-                    body=result['content'],
+                # For successful responses, create a streaming response
+                response_obj = result['response']
+                session = result['session']
+                
+                # Create a streaming response
+                stream_response = web.StreamResponse(
                     status=result['status'],
                     headers=result['headers']
                 )
+                
+                # Prepare the streaming response
+                await stream_response.prepare(request)
+                
+                bytes_transferred = 0
+                try:
+                    # Stream content in chunks using thread executor
+                    loop = asyncio.get_event_loop()
+                    
+                    # Create iterator once
+                    content_iter = response_obj.iter_content(chunk_size=65536)
+                    
+                    while True:
+                        # Get next chunk in thread executor to avoid blocking
+                        try:
+                            chunk = await loop.run_in_executor(None, lambda: next(content_iter, None))
+                            if chunk is None:
+                                break
+                            await stream_response.write(chunk)
+                            bytes_transferred += len(chunk)
+                        except StopIteration:
+                            break
+                    
+                    self.log_message(f"Streamed {bytes_transferred} bytes successfully")
+                    
+                finally:
+                    # Always close the session when done
+                    session.close()
+                
+                return stream_response
             else:
                 return self.send_error_response(result['status'], result['error'])
             

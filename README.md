@@ -13,6 +13,7 @@ A clean, modern Python reverse proxy server with minimal dependencies that suppo
 - **Per-Request Caching**: Enable caching on individual requests with `&cache=true`
 - **TLS Bypass**: Option to skip TLS certificate verification
 - **Custom Headers**: Add custom request and response headers
+- **Redirect Following**: Control whether HTTP redirects are followed
 - **All HTTP Methods**: Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
 - **Minimal Dependencies**: Only requires the `requests` library
 
@@ -31,27 +32,39 @@ python reverse_proxy.py
 
 ## Configuration
 
-The proxy uses a JSON configuration file (`proxy_config.json`) that will be created automatically on first run with default settings.
-
-### Configuration Structure
+The proxy server is configured via `proxy_config.json`. Here's the configuration structure:
 
 ```json
 {
+  "clear_cache_on_start": false,
   "instances": {
-    "instance_name": {
-      "access_mode": "both|local|external",
-      "tokens": ["token1", "token2"],
+    "default": {
+      "access_mode": "both",
+      "tokens": ["your-secret-token-here"],
       "cache_enabled": true,
       "cache_ttl": 3600,
-      "cache_max_size_mb": 100,
+      "cache_max_size_mb": 0,
       "rate_limit": 100,
-      "allowed_cidrs": ["192.168.0.0/16", "10.0.0.0/8"]
+      "allowed_cidrs": []
+    },
+    "internal": {
+      "access_mode": "local",
+      "tokens": [],
+      "cache_enabled": false,
+      "cache_ttl": 0,
+      "cache_max_size_mb": 0,
+      "rate_limit": 0,
+      "allowed_cidrs": ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
     }
   }
 }
 ```
 
-### Configuration Options
+#### Global Configuration Options
+
+- **clear_cache_on_start**: (boolean) If set to `true`, clears the entire cache directory when the server starts up. Useful for development and testing. Default: `false`
+
+#### Instance Configuration Options
 
 - **access_mode**: 
   - `"local"`: Only allow private IP addresses (Class A, B, C)
@@ -191,6 +204,26 @@ curl -X POST -d '{"query": "data"}' \
   "http://localhost:8080/default?url=https://api.example.com/search&token=your-token&cache=true"
 ```
 
+#### Redirect Following Examples
+
+```bash
+# Default behavior - redirects are NOT followed (returns redirect response)
+curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token"
+
+# Enable redirect following to get final response
+curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token&follow_redirects=true"
+
+# Follow multiple redirects
+curl "http://localhost:8080/default?url=https://httpbin.org/redirect/3&token=your-token&follow_redirects=true"
+
+# Alternative parameter values (all equivalent to true)
+curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token&follow_redirects=1"
+curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token&follow_redirects=yes"
+
+# Explicit disable (same as default)
+curl "http://localhost:8080/default?url=https://httpbin.org/redirect/1&token=your-token&follow_redirects=false"
+```
+
 #### Advanced Examples
 
 ```bash
@@ -223,6 +256,7 @@ curl "http://localhost:8080/default?url=https://httpbin.org/get&request_headers[
 - `url`: Target URL to proxy to (required)
 - `token`: Authentication token (required if tokens are configured)
 - `cache`: Set to `true` to enable disk caching for this request
+- `follow_redirects`: Set to `true` to follow HTTP redirects (default: `false`)
 - `skip_tls_checks`: Comma-separated list of TLS errors to ignore, or `all` to bypass all SSL verification
 - `request_headers[HeaderName]`: Add custom request headers
 - `response_header[HeaderName]`: Add custom response headers
@@ -340,54 +374,4 @@ All errors are returned as JSON:
 ```
 
 Common error codes:
-- `400`: Bad request (missing URL or instance name)
-- `401`: Authentication failed
-- `403`: Access denied (IP restrictions)
-- `404`: Instance not found
-- `429`: Rate limit exceeded
-- `502`: Bad gateway (target server error)
-
-## Performance
-
-- **Concurrent Connections**: Multi-threaded server handles multiple simultaneous requests
-- **Persistent Caching**: Disk-based caching with automatic size management
-- **SHA1 Hashing**: Fast and collision-resistant cache key generation
-- **Streaming**: Large responses are streamed to minimize memory usage
-- **Threading**: Background cache cleanup and rate limit tracking
-- **Connection Reuse**: HTTP session reuse for better performance
-
-## Limitations
-
-- **DNS Override**: Custom DNS servers are not yet implemented (requires additional dependencies)
-- **Cache Size**: No automatic cache size limits (monitor disk usage)
-- **Single Process**: No built-in clustering or load balancing
-- **Cache Invalidation**: No manual cache invalidation API (use file system)
-
-## Testing
-
-Run the included test suite:
-
-```bash
-# Start the proxy server
-python reverse_proxy.py
-
-# In another terminal, run tests
-python test_proxy.py
-```
-
-The test suite includes:
-- Basic proxy functionality
-- Disk cache testing
-- Cache parameter differentiation
-- POST request caching
-- Custom headers
-- TLS bypass
-- Error handling
-
-## Contributing
-
-Feel free to submit issues and enhancement requests!
-
-## License
-
-This project is provided as-is for educational and development purposes. 
+- `

@@ -10,7 +10,7 @@ import socket
 import ssl
 import urllib.parse
 from datetime import datetime, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Any
 import hashlib
 import time
@@ -19,6 +19,7 @@ import os
 import pickle
 import warnings
 import subprocess
+import shutil
 
 try:
     import requests
@@ -549,8 +550,15 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             # Configure TLS error handling
             skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
             if skip_tls_checks_param[0]:
-                # Parse comma-separated list of TLS errors to ignore
-                skip_tls_checks = [error.strip().lower() for error in skip_tls_checks_param[0].split(',')]
+                skip_tls_value = skip_tls_checks_param[0].lower()
+                
+                # Handle boolean-style values (true/false) and convert to 'all'
+                if skip_tls_value in ['true', '1', 'yes']:
+                    skip_tls_checks = ['all']
+                    self.log_message("TLS parameter 'true' detected, ignoring ALL TLS errors")
+                else:
+                    # Parse comma-separated list of TLS errors to ignore
+                    skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
                 
                 # Check for ALL option - completely disable TLS verification
                 if 'all' in skip_tls_checks:
@@ -574,6 +582,14 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 # This would require additional libraries like dnspython
                 pass
             
+            # Configure redirect following
+            follow_redirects_param = query_params.get('follow_redirects', ['false'])
+            follow_redirects = follow_redirects_param[0].lower() in ['true', '1', 'yes']
+            if follow_redirects:
+                self.log_message("Redirect following enabled")
+            else:
+                self.log_message("Redirect following disabled (default)")
+            
             # Prepare headers
             headers = dict(self.headers)
             
@@ -588,17 +604,20 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                     header_name = key[16:-1]  # Remove 'request_headers[' and ']'
                     headers[header_name] = values[0]
             
-            # Fix Host header to match target URL hostname
+            # Fix Host header to match target URL hostname (for virtual hosts)
             from urllib.parse import urlparse
             parsed_target = urlparse(target_url)
             if parsed_target.hostname:
-                # Set Host header to target hostname (with port if non-standard)
-                if ((parsed_target.scheme == 'https' and parsed_target.port not in [None, 443]) or
-                    (parsed_target.scheme == 'http' and parsed_target.port not in [None, 80])):
-                    headers['Host'] = f"{parsed_target.hostname}:{parsed_target.port}"
-                else:
+                # Check if the hostname is an IP address
+                try:
+                    ipaddress.ip_address(parsed_target.hostname)
+                    # It's an IP address - set Host header to the IP (some servers expect this)
                     headers['Host'] = parsed_target.hostname
-                self.log_message(f"📤 Fixed Host header to: {headers['Host']}")
+                    self.log_message(f"Fixed Host header to IP: {headers['Host']}")
+                except ValueError:
+                    # It's a hostname - always use just the hostname (no port for virtual hosts)
+                    headers['Host'] = parsed_target.hostname
+                    self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
             
             # Always ensure User-Agent is explicitly set (use blank if none provided)
             user_agent_set = False
@@ -633,7 +652,8 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 'url': target_url,
                 'headers': headers,
                 'stream': True,
-                'timeout': 30
+                'timeout': 30,
+                'allow_redirects': follow_redirects
             }
             
             # Add body for methods that support it
@@ -641,28 +661,43 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 request_kwargs['data'] = body
             
             # Log the request headers being sent to target URL
-            self.log_message(f"📤 Request to {target_url}")
-            self.log_message(f"📤 Method: {method}")
+            self.log_message(f"REQUEST to {target_url}")
+            self.log_message(f"Request method: {method}")
             if headers:
-                self.log_message("📤 Request headers sent to target:")
+                self.log_message("Request headers being sent to target:")
                 for header_name, header_value in headers.items():
                     # Truncate very long header values for readability
                     if len(str(header_value)) > 100:
                         display_value = str(header_value)[:97] + "..."
                     else:
                         display_value = header_value
-                    self.log_message(f"📤   {header_name}: {display_value}")
+                    self.log_message(f"  {header_name}: {display_value}")
             else:
-                self.log_message("📤 No custom headers sent to target")
+                self.log_message("No custom headers being sent to target")
             
             if body:
                 body_size = len(body)
                 if body_size > 1024:
-                    self.log_message(f"📤 Request body: {body_size} bytes")
+                    self.log_message(f"Request body: {body_size} bytes")
                 else:
-                    self.log_message(f"📤 Request body: {body_size} bytes - {body[:100]}{'...' if len(body) > 100 else ''}")
+                    self.log_message(f"Request body: {body_size} bytes - {body[:100]}{'...' if len(body) > 100 else ''}")
             
             response = session.request(**request_kwargs)
+            
+            # Log the response headers received from target
+            self.log_message(f"RESPONSE from {target_url}")
+            self.log_message(f"Response status: {response.status_code}")
+            if response.headers:
+                self.log_message("Response headers received from target:")
+                for header_name, header_value in response.headers.items():
+                    # Truncate very long header values for readability
+                    if len(str(header_value)) > 100:
+                        display_value = str(header_value)[:97] + "..."
+                    else:
+                        display_value = header_value
+                    self.log_message(f"  {header_name}: {display_value}")
+            else:
+                self.log_message("No response headers received from target")
             
             # Send response
             self.send_response(response.status_code)
@@ -812,11 +847,18 @@ class ReverseProxyServer:
             with open(self.config_file, 'r') as f:
                 config = json.load(f)
             
+            # Load global configuration options
+            self.clear_cache_on_start = config.get('clear_cache_on_start', False)
+            
             self.instances = {}
             for name, instance_config in config.get('instances', {}).items():
                 self.instances[name] = ProxyInstance(name, instance_config)
             
             print(f"Loaded {len(self.instances)} proxy instances")
+            
+            # Clear cache on startup if configured
+            if self.clear_cache_on_start:
+                self.clear_startup_cache()
             
         except FileNotFoundError:
             print(f"Config file {self.config_file} not found. Creating default config.")
@@ -828,6 +870,7 @@ class ReverseProxyServer:
     def create_default_config(self):
         """Create a default configuration file"""
         default_config = {
+            "clear_cache_on_start": False,
             "instances": {
                 "default": {
                     "access_mode": "both",
@@ -856,6 +899,28 @@ class ReverseProxyServer:
         print(f"Created default config file: {self.config_file}")
         self.load_config()
     
+    def clear_startup_cache(self):
+        """Clear cache directory on startup if configured"""
+        if os.path.exists(self.disk_cache.cache_dir):
+            try:
+                # Get cache stats before clearing
+                cache_stats = self.disk_cache.get_cache_stats()
+                files_count = cache_stats['total_files']
+                size_mb = cache_stats['total_size_mb']
+                
+                # Remove all cache files
+                shutil.rmtree(self.disk_cache.cache_dir)
+                
+                # Recreate the cache directory
+                os.makedirs(self.disk_cache.cache_dir)
+                
+                print(f"Cache cleared on startup: removed {files_count} files ({size_mb}MB)")
+                
+            except Exception as e:
+                print(f"Warning: Failed to clear cache on startup: {e}")
+        else:
+            print("Cache directory didn't exist, nothing to clear")
+    
     def cache_cleanup_worker(self):
         """Background worker to clean up expired cache entries"""
         while True:
@@ -882,7 +947,7 @@ class ReverseProxyServer:
             test_socket.close()
             
             if result == 0:
-                print(f"❌ ERROR: Port {port} is already in use!")
+                print(f"ERROR: Port {port} is already in use!")
                 print(f"   Another service is already running on {host}:{port}")
                 print(f"   Please stop the other service or use a different port with --port")
                 
@@ -912,7 +977,7 @@ class ReverseProxyServer:
             test_socket.bind((host, port))
             test_socket.close()
         except OSError as e:
-            print(f"❌ ERROR: Cannot bind to {host}:{port}")
+            print(f"ERROR: Cannot bind to {host}:{port}")
             if "Address already in use" in str(e) or e.errno == 98:
                 print(f"   Port {port} is already in use by another process")
                 print(f"   Please stop the other process or use a different port with --port")
@@ -924,31 +989,32 @@ class ReverseProxyServer:
         handler = self.create_handler()
         
         try:
-            server = HTTPServer((host, port), handler)
+            server = ThreadingHTTPServer((host, port), handler)
             # Only set SO_REUSEADDR on the actual server, not the test socket
             server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         except OSError as e:
-            print(f"❌ ERROR: Failed to create server on {host}:{port}")
+            print(f"ERROR: Failed to create server on {host}:{port}")
             print(f"   Error details: {e}")
             exit(1)
         
-        print(f"✅ Reverse Proxy Server starting on {host}:{port}")
-        print(f"📋 Available instances: {list(self.instances.keys())}")
+        print(f"Reverse Proxy Server starting on {host}:{port}")
+        print(f"Available instances: {list(self.instances.keys())}")
+        print("Multi-threaded server - supports concurrent requests")
         
         # Print cache stats
         cache_stats = self.disk_cache.get_cache_stats()
-        print(f"💾 Disk cache: {cache_stats['total_files']} files, {cache_stats['total_size_mb']}MB ({cache_stats['total_size_bytes']} bytes)")
+        print(f"Disk cache: {cache_stats['total_files']} files, {cache_stats['total_size_mb']}MB ({cache_stats['total_size_bytes']} bytes)")
         if cache_stats['expired_files'] > 0:
-            print(f"🧹 Cache cleanup needed: {cache_stats['expired_files']} expired files")
+            print(f"Cache cleanup needed: {cache_stats['expired_files']} expired files")
         
-        print("🎯 Server ready! Press Ctrl+C to stop")
+        print("Server ready! Press Ctrl+C to stop")
         
         try:
             server.serve_forever()
         except KeyboardInterrupt:
-            print("\n🛑 Shutting down server...")
+            print("\nShutting down server...")
             server.shutdown()
-            print("✅ Server stopped successfully")
+            print("Server stopped successfully")
 
 
 if __name__ == '__main__':

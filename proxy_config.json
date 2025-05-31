@@ -1,4 +1,5 @@
 {
+  "clear_cache_on_start": true,
   "instances": {
     "default": {
       "access_mode": "both",

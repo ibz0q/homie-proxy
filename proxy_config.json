@@ -1,0 +1,28 @@
+{
+  "instances": {
+    "default": {
+      "access_mode": "both",
+      "tokens": [
+        "your-secret-token-here"
+      ],
+      "cache_enabled": true,
+      "cache_ttl": 3600,
+      "cache_max_size_mb": 0,
+      "rate_limit": 100,
+      "allowed_cidrs": []
+    },
+    "internal": {
+      "access_mode": "local",
+      "tokens": [],
+      "cache_enabled": false,
+      "cache_ttl": 0,
+      "cache_max_size_mb": 0,
+      "rate_limit": 0,
+      "allowed_cidrs": [
+        "192.168.0.0/16",
+        "10.0.0.0/8",
+        "172.16.0.0/12"
+      ]
+    }
+  }
+}

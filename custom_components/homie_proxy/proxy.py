@@ -164,8 +164,14 @@ class ProxyInstance:
     
     def is_token_valid(self, token: str) -> bool:
         """Check if provided token is valid"""
+        # If no tokens are configured, deny all access for security
         if not self.tokens:
-            return True  # No tokens required
+            return False
+        
+        # Token must be provided and must be in the configured tokens list
+        if not token:
+            return False
+            
         return token in self.tokens
 
 
@@ -372,9 +378,16 @@ class HomieProxyRequestHandler:
             tokens = query_params.get('token', [])
             token = tokens[0] if tokens else None
             
-            # TEMPORARY: Allow unauthenticated access for testing
-            # if not self.proxy_instance.is_token_valid(token):
-            #     return self.send_error_response(401, "Invalid or missing token")
+            # Check if token is valid
+            if not self.proxy_instance.is_token_valid(token):
+                self.log_message(f"Authentication failed: Invalid token '{token}' for instance '{self.proxy_instance.name}'")
+                if self.proxy_instance.tokens:
+                    self.log_message(f"Valid tokens for this instance: {len(self.proxy_instance.tokens)} configured")
+                else:
+                    self.log_message("No tokens configured for this instance - all requests will be denied")
+                return self.send_error_response(401, "Invalid or missing authentication token")
+            
+            self.log_message(f"Authentication successful for instance '{self.proxy_instance.name}'")
             
             # Get request body for methods that might have a body
             body = None

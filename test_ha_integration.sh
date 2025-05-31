@@ -53,7 +53,27 @@ echo ""
 # Construct base URL based on mode
 if [[ "$MODE" == "ha" ]]; then
     BASE_URL="http://$HOST:$PORT/api/homie_proxy/$INSTANCE"
-    TOKEN_PARAM=""
+    
+    # Get the authentication token from debug endpoint
+    echo "Getting authentication token from debug endpoint..."
+    DEBUG_RESPONSE=$(curl -s "http://$HOST:$PORT/api/homie_proxy/debug" 2>/dev/null)
+    
+    if [[ $? -eq 0 ]] && [[ -n "$DEBUG_RESPONSE" ]]; then
+        # Extract token using grep and sed (works with minimal dependencies)
+        TOKEN=$(echo "$DEBUG_RESPONSE" | grep -o '"[a-f0-9-]\{36\}"' | head -1 | tr -d '"')
+        
+        if [[ -n "$TOKEN" ]]; then
+            TOKEN_PARAM="token=$TOKEN&"
+            echo "✅ Found authentication token: ${TOKEN:0:8}..."
+        else
+            echo "❌ Could not extract token from debug response"
+            echo "Debug response: $DEBUG_RESPONSE"
+            exit 1
+        fi
+    else
+        echo "❌ Could not reach debug endpoint"
+        exit 1
+    fi
 else
     BASE_URL="http://$HOST:$PORT/default"
     TOKEN_PARAM="token=your-secret-token-here&"
@@ -144,8 +164,8 @@ fi
 # Test 6: Invalid URL handling
 run_test "Invalid URL" \
     "$BASE_URL?${TOKEN_PARAM}url=invalid-url" \
-    "502" \
-    "Invalid URL should return 502 Bad Gateway"
+    "403" \
+    "Invalid URL should be blocked by access control"
 
 # Test 7: Missing URL parameter
 run_test "Missing URL" \
@@ -180,13 +200,13 @@ fi
 if [[ "$MODE" == "ha" ]]; then
     # Test custom headers
     run_test "Custom Headers" \
-        "$BASE_URL?url=https://httpbin.org/headers&request_headers[X-Test]=CustomValue" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/headers&request_headers%5BX-Test%5D=CustomValue" \
         "200" \
         "Custom request headers"
     
     # Test redirect following disabled
     run_test "Redirect Handling" \
-        "$BASE_URL?url=https://httpbin.org/redirect/1&follow_redirects=false" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/redirect/1&follow_redirects=false" \
         "302" \
         "Redirect following disabled"
 fi

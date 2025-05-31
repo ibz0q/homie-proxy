@@ -217,8 +217,8 @@ async def handle_websocket_proxy(proxy_instance: ProxyInstance, request_data: di
         return {'success': False, 'error': f"WebSocket setup error: {str(e)}", 'status': 500}
 
 
-async def async_proxy_request(proxy_instance: ProxyInstance, request_data: dict) -> dict:
-    """Async proxy request function using aiohttp"""
+async def async_proxy_request(proxy_instance: ProxyInstance, request_data: dict, aiohttp_request: Optional[object] = None) -> dict:
+    """Async proxy request function using aiohttp with clean streaming"""
     try:
         client_ip = request_data['client_ip']
         method = request_data['method']
@@ -253,67 +253,84 @@ async def async_proxy_request(proxy_instance: ProxyInstance, request_data: dict)
         # Configure connector with SSL context
         connector = aiohttp.TCPConnector(ssl=ssl_context) if ssl_context else None
         
-        try:
-            # Create aiohttp session
-            async with aiohttp.ClientSession(
-                timeout=timeout,
-                connector=connector
-            ) as session:
+        # Create aiohttp session
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector
+        ) as session:
+            
+            # Make the request
+            request_kwargs = {
+                'method': method,
+                'url': target_url,
+                'headers': headers,
+                'allow_redirects': follow_redirects
+            }
+            
+            # Add body for methods that support it
+            if body is not None:
+                request_kwargs['data'] = body
+            
+            async with session.request(**request_kwargs) as response:
                 
-                # Make the request
-                request_kwargs = {
-                    'method': method,
-                    'url': target_url,
-                    'headers': headers,
-                    'allow_redirects': follow_redirects
+                # Prepare response headers - pass through all headers from target
+                response_headers = {}
+                excluded_response_headers = {
+                    'connection', 'transfer-encoding', 'content-encoding'
                 }
                 
-                # Add body for methods that support it
-                if body is not None:
-                    request_kwargs['data'] = body
+                for header, value in response.headers.items():
+                    if header.lower() not in excluded_response_headers:
+                        response_headers[header] = value
                 
-                async with session.request(**request_kwargs) as response:
+                # Add custom response headers
+                for key, values in query_params.items():
+                    if key.startswith('response_header[') and key.endswith(']'):
+                        header_name = key[16:-1]
+                        response_headers[header_name] = values[0]
+                
+                # If we have the aiohttp request object, do streaming
+                if aiohttp_request:
+                    # Create streaming response
+                    stream_response = web.StreamResponse(
+                        status=response.status,
+                        headers=response_headers
+                    )
                     
-                    # Prepare response headers - pass through all headers from target
-                    response_headers = {}
-                    excluded_response_headers = {
-                        'connection', 'transfer-encoding', 'content-encoding'
-                    }
+                    await stream_response.prepare(aiohttp_request)
                     
-                    for header, value in response.headers.items():
-                        if header.lower() not in excluded_response_headers:
-                            response_headers[header] = value
-                    
-                    # Add custom response headers
-                    for key, values in query_params.items():
-                        if key.startswith('response_header[') and key.endswith(']'):
-                            header_name = key[16:-1]  # Remove 'response_header[' and ']'
-                            response_headers[header_name] = values[0]
-                    
-                    # Read all response data within the async context
-                    response_data = b''
-                    async for chunk in response.content.iter_chunked(65536):
+                    bytes_transferred = 0
+                    # Stream the response data
+                    async for chunk in response.content.iter_chunked(8192):
                         if chunk:
-                            response_data += chunk
+                            await stream_response.write(chunk)
+                            bytes_transferred += len(chunk)
                     
-                    # Return response data that's fully read
+                    await stream_response.write_eof()
+                    _LOGGER.info(f"Streamed response: {bytes_transferred} bytes")
+                    
+                    return {
+                        'success': True,
+                        'stream_response': stream_response
+                    }
+                else:
+                    # Fallback for non-streaming responses
+                    response_data = await response.read()
+                    
                     return {
                         'success': True,
                         'status': response.status,
                         'headers': response_headers,
-                        'data': response_data,  # Fully read data
+                        'data': response_data,
                         'is_websocket': False
                     }
-                    
-        except aiohttp.ClientError as e:
-            return {'success': False, 'error': f"Bad Gateway: {str(e)}", 'status': 502}
-                
-        except asyncio.TimeoutError:
-            return {'success': False, 'error': "Gateway Timeout", 'status': 504}
-        
-        except OSError as e:
-            return {'success': False, 'error': "Internal server error", 'status': 500}
-        
+                        
+    except aiohttp.ClientError as e:
+        return {'success': False, 'error': f"Bad Gateway: {str(e)}", 'status': 502}
+            
+    except asyncio.TimeoutError:
+        return {'success': False, 'error': "Gateway Timeout", 'status': 504}
+    
     except Exception as e:
         _LOGGER.error("Async proxy request error: %s", e)
         return {'success': False, 'error': "Internal server error", 'status': 500}
@@ -554,22 +571,24 @@ class HomieProxyRequestHandler:
                 'target_url': target_url
             }
             
-            # Make the async proxy request
-            result = await async_proxy_request(self.proxy_instance, request_data)
+            # Make the async proxy request with streaming support
+            result = await async_proxy_request(self.proxy_instance, request_data, request)
             
             if result['success']:
-                # For successful responses, create a simple response with the data
-                response_data = result['data']
-                
-                bytes_transferred = len(response_data) if response_data else 0
-                self.log_message(f"Sending response: {bytes_transferred} bytes")
-                
-                # Create a simple response since we already have all the data
-                return web.Response(
-                    body=response_data,
-                    status=result['status'],
-                    headers=result['headers']
-                )
+                # Check if we got a streaming response
+                if 'stream_response' in result:
+                    return result['stream_response']
+                else:
+                    # For non-streaming responses
+                    response_data = result.get('data', b'')
+                    bytes_transferred = len(response_data) if response_data else 0
+                    self.log_message(f"Sending response: {bytes_transferred} bytes")
+                    
+                    return web.Response(
+                        body=response_data,
+                        status=result['status'],
+                        headers=result['headers']
+                    )
             else:
                 return self.send_error_response(result['status'], result['error'])
             
@@ -686,29 +705,10 @@ class HomieProxyView(HomeAssistantView):
         self.name = f"api:homie_proxy:{proxy_instance.name}"
         self.requires_auth = False  # We handle auth with tokens
 
-    async def get(self, request: Request) -> web.Response:
-        """Handle GET request (including WebSocket upgrades)."""
-        return await self.handler.handle_request(request, "GET")
-
-    async def post(self, request: Request) -> web.Response:
-        """Handle POST request."""
-        return await self.handler.handle_request(request, "POST")
-
-    async def put(self, request: Request) -> web.Response:
-        """Handle PUT request."""
-        return await self.handler.handle_request(request, "PUT")
-
-    async def patch(self, request: Request) -> web.Response:
-        """Handle PATCH request."""
-        return await self.handler.handle_request(request, "PATCH")
-
-    async def delete(self, request: Request) -> web.Response:
-        """Handle DELETE request."""
-        return await self.handler.handle_request(request, "DELETE")
-
-    async def head(self, request: Request) -> web.Response:
-        """Handle HEAD request."""
-        return await self.handler.handle_request(request, "HEAD")
+    async def _handle(self, request: Request, **kwargs) -> web.Response:
+        """Handle all HTTP methods (GET, POST, PUT, PATCH, DELETE, HEAD) and WebSocket upgrades."""
+        method = request.method.upper()
+        return await self.handler.handle_request(request, method)
 
 
 class HomieProxyDebugView(HomeAssistantView):

@@ -309,7 +309,7 @@ code .
 ### Development Commands
 
 ```bash
-# Container management  
+# Container management
 docker-compose -f .devcontainer/docker-compose.yml up -d
 docker restart ha-dev  # Restart HA after integration changes
 

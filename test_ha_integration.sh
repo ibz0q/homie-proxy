@@ -338,6 +338,73 @@ if [[ "$MODE" == "ha" ]]; then
         echo "   Status: $stream_code (expected 200)"
     fi
     echo ""
+    
+    # Test Video Streaming Performance vs Direct
+    echo "Test $((TESTS_TOTAL + 1)): Video Streaming Performance Comparison"
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    
+    VIDEO_URL="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+    DOWNLOAD_TIMEOUT=10  # 10 second timeout for partial download
+    
+    echo "Comparing video streaming performance (${DOWNLOAD_TIMEOUT}s timeout):"
+    echo "Video URL: $VIDEO_URL"
+    
+    # Test direct curl performance
+    echo "Testing direct curl..."
+    direct_start=$(date +%s.%N)
+    direct_result=$(timeout $DOWNLOAD_TIMEOUT curl -s "$VIDEO_URL" -o /dev/null -w "%{size_download}" 2>/dev/null)
+    direct_exit_code=$?
+    direct_end=$(date +%s.%N)
+    direct_time=$(echo "$direct_end - $direct_start" | bc 2>/dev/null || echo "N/A")
+    direct_bytes=${direct_result:-0}
+    
+    # Test HA HomieProxy performance  
+    echo "Testing HA HomieProxy..."
+    proxy_start=$(date +%s.%N)
+    proxy_result=$(timeout $DOWNLOAD_TIMEOUT curl -s "$BASE_URL?${TOKEN_PARAM}url=$VIDEO_URL" -o /dev/null -w "%{size_download}" 2>/dev/null)
+    proxy_exit_code=$?
+    proxy_end=$(date +%s.%N)
+    proxy_time=$(echo "$proxy_end - $proxy_start" | bc 2>/dev/null || echo "N/A")
+    proxy_bytes=${proxy_result:-0}
+    
+    echo "Results:"
+    echo "   Direct curl:    ${direct_time}s, ${direct_bytes} bytes, exit_code: $direct_exit_code"
+    echo "   HA HomieProxy:  ${proxy_time}s, ${proxy_bytes} bytes, exit_code: $proxy_exit_code"
+    
+    # Calculate performance ratio if both have valid times
+    if [[ "$direct_time" != "N/A" && "$proxy_time" != "N/A" && $(echo "$direct_time > 0" | bc 2>/dev/null) -eq 1 ]]; then
+        # Calculate if HA is within 50% of direct performance (1.5x slower is acceptable)
+        max_acceptable_time=$(echo "$direct_time * 1.5" | bc 2>/dev/null)
+        performance_ratio=$(echo "scale=2; $proxy_time / $direct_time" | bc 2>/dev/null)
+        
+        echo "   Performance ratio: ${performance_ratio}x (HA vs Direct)"
+        echo "   Max acceptable ratio: 1.5x (50% slower)"
+        
+        # Test passes if:
+        # 1. Both downloaded some data (streaming works)
+        # 2. HA performance is within 50% of direct (ratio <= 1.5)
+        # 3. Both should timeout (exit code 124) since it's a large file
+        if [[ $direct_bytes -gt 0 && $proxy_bytes -gt 0 ]]; then
+            if [[ $(echo "$proxy_time <= $max_acceptable_time" | bc 2>/dev/null) -eq 1 ]]; then
+                echo "✅ PASS: Video streaming performance within acceptable range"
+                echo "   Both direct and proxy successfully streamed data"
+                TESTS_PASSED=$((TESTS_PASSED + 1))
+            else
+                echo "❌ FAIL: HA HomieProxy too slow (${performance_ratio}x vs max 1.5x)"
+                echo "   Streaming may be buffering instead of truly streaming"
+            fi
+        else
+            echo "❌ FAIL: One or both methods failed to download data"
+            echo "   Direct: $direct_bytes bytes, Proxy: $proxy_bytes bytes"
+            if [[ $proxy_bytes -eq 0 ]]; then
+                echo "   HA HomieProxy streaming appears to be broken"
+            fi
+        fi
+    else
+        echo "❌ FAIL: Could not calculate performance metrics"
+        echo "   This suggests timing measurement issues"
+    fi
+    echo ""
 fi
 
 # Summary

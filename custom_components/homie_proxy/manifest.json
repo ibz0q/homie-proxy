@@ -1,6 +1,6 @@
 {
   "domain": "homie_proxy",
-  "name": "Homie Proxy",
+  "name": "HomieProxy",
   "codeowners": ["@developer"],
   "config_flow": true,
   "dependencies": [],

@@ -17,7 +17,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, CONF_NAME, CONF_TOKEN, CONF_TOKENS, CONF_RESTRICT_OUT, CONF_RESTRICT_IN
+from .const import DOMAIN
 from .proxy import HomieProxyService
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,14 +31,14 @@ def migrate_config_data(config: Dict[str, Any]) -> Dict[str, Any]:
     config = dict(config)  # Create a copy
     
     # Migrate single token to tokens list if needed
-    if CONF_TOKEN in config and CONF_TOKENS not in config:
-        tokens = [config[CONF_TOKEN]]
-        config[CONF_TOKENS] = tokens
-        del config[CONF_TOKEN]
+    if "token" in config and "tokens" not in config:
+        tokens = [config["token"]]
+        config["tokens"] = tokens
+        del config["token"]
         _LOGGER.info("Migrated single token to tokens list")
-    elif CONF_TOKENS not in config:
+    elif "tokens" not in config:
         # No tokens at all, this shouldn't happen but handle gracefully
-        config[CONF_TOKENS] = []
+        config["tokens"] = []
         _LOGGER.warning("No tokens found in config, initialized empty list")
     
     return config
@@ -56,7 +56,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Homie Proxy from a config entry."""
-    _LOGGER.info("Setting up Homie Proxy instance: %s", entry.data.get(CONF_NAME))
+    _LOGGER.info("Setting up Homie Proxy instance: %s", entry.data.get("name"))
     
     # Migrate configuration if needed
     config = migrate_config_data(entry.data)
@@ -67,10 +67,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Updated config entry with migrated data")
     
     # Get configuration
-    name = config.get(CONF_NAME)
-    tokens = config.get(CONF_TOKENS, [])
-    restrict_out = config.get(CONF_RESTRICT_OUT)
-    restrict_in = config.get(CONF_RESTRICT_IN)
+    name = config.get("name")
+    tokens = config.get("tokens", [])
+    restrict_out = config.get("restrict_out")
+    restrict_in = config.get("restrict_in")
     
     if not tokens:
         _LOGGER.error("No tokens configured for Homie Proxy instance '%s'", name)
@@ -109,7 +109,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Homie Proxy config entry."""
-    _LOGGER.info("Unloading Homie Proxy instance: %s", entry.data.get(CONF_NAME))
+    _LOGGER.info("Unloading Homie Proxy instance: %s", entry.data.get("name"))
     
     # Get service instance
     instance_data = hass.data[DOMAIN].get(entry.entry_id)
@@ -125,7 +125,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle configuration updates."""
-    _LOGGER.info("Updating Homie Proxy instance: %s", entry.data.get(CONF_NAME))
+    _LOGGER.info("Updating Homie Proxy instance: %s", entry.data.get("name"))
     
     # Get service instance
     instance_data = hass.data[DOMAIN].get(entry.entry_id)
@@ -139,9 +139,9 @@ async def async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None
     config = migrate_config_data(entry.data)
     
     # Get updated configuration
-    tokens = config.get(CONF_TOKENS, [])
-    restrict_out = config.get(CONF_RESTRICT_OUT)
-    restrict_in = config.get(CONF_RESTRICT_IN)
+    tokens = config.get("tokens", [])
+    restrict_out = config.get("restrict_out")
+    restrict_in = config.get("restrict_in")
     
     # Update the service
     await proxy_service.update(

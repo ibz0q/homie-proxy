@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-echo "🧪 Testing Home Assistant + Homie Proxy Development Environment"
-echo "=============================================================="
+echo "🧪 Testing Home Assistant + Integrated Homie Proxy"
+echo "=================================================="
 
 # Colors for output
 RED='\033[0;31m'
@@ -71,27 +71,21 @@ wait_for_service() {
     return 1
 }
 
-echo "🔍 Checking if services are running..."
+echo "🔍 Checking if Home Assistant is running..."
 
-# Check if containers are running
+# Check if Home Assistant container is running
 if ! docker ps | grep -q "ha-dev"; then
     echo -e "${RED}❌ Home Assistant container (ha-dev) is not running${NC}"
-    echo "Please start the devcontainer first"
+    echo "Please start the devcontainer first with:"
+    echo "  docker-compose -f .devcontainer/docker-compose.yml up -d"
     exit 1
 fi
 
-if ! docker ps | grep -q "homie-proxy-dev"; then
-    echo -e "${RED}❌ Homie Proxy container (homie-proxy-dev) is not running${NC}"
-    echo "Please start the devcontainer first"
-    exit 1
-fi
-
-echo -e "${GREEN}✅ Both containers are running${NC}"
+echo -e "${GREEN}✅ Home Assistant container is running${NC}"
 echo ""
 
 # Wait for services to be ready
 wait_for_service "http://localhost:8123/api/" "Home Assistant"
-wait_for_service "http://localhost:8080/" "Homie Proxy" || echo "⚠️  Homie Proxy might not be fully ready, continuing..."
 
 echo ""
 echo "🧪 Running API Tests..."
@@ -111,9 +105,6 @@ test_endpoint "http://localhost:8123/api/hello_world/info" "Hello World Integrat
 
 # Test Hello World Integration State
 test_endpoint "http://localhost:8123/api/states/hello_world.status" "Hello World Integration - State"
-
-# Test Homie Proxy
-test_endpoint "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get" "Homie Proxy - Basic Test"
 
 echo "🎯 Testing POST Requests..."
 echo "=========================="
@@ -149,10 +140,12 @@ echo "🔗 Access URLs:"
 echo "  • Home Assistant: http://localhost:8123"
 echo "  • Hello World API: http://localhost:8123/api/hello_world"
 echo "  • Hello World Info: http://localhost:8123/api/hello_world/info"
-echo "  • Homie Proxy: http://localhost:8080"
+echo ""
+echo "🏠 HomieProxy Integration:"
+echo "  • Configure via: Settings → Devices & Services → Add Integration → HomieProxy"
+echo "  • Access endpoints: http://localhost:8123/api/homie_proxy/{instance_name}"
 echo ""
 echo "📚 Development Commands:"
 echo "  • View HA logs: docker logs ha-dev -f"
-echo "  • View Proxy logs: docker logs homie-proxy-dev -f"
 echo "  • Restart HA: docker restart ha-dev"
 echo "  • Shell into HA: docker exec -it ha-dev bash" 

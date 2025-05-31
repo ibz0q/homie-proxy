@@ -2,84 +2,25 @@
   "config": {
     "step": {
       "user": {
-        "title": "🔗 Add Homie Proxy Instance",
-        "description": "Create a new HTTP proxy instance with custom access controls and restrictions.\n\n**Your proxy endpoint will be:**\n`{sample_endpoint}`\n\n**Outbound Restrictions:**\n• **Allow all destinations** - No restrictions on target URLs\n• **Private networks only** - {private_networks}\n• **Local network only** - {local_network}\n• **Custom CIDR range** - Specify your own network range",
+        "title": "Add HomieProxy",
+        "description": "Set up a new HTTP proxy endpoint with access controls. A secure token will be automatically generated.",
         "data": {
-          "name": "📛 Instance Name",
-          "restrict_out": "🌐 Outbound Restrictions",
-          "restrict_out_custom": "📋 Custom CIDR Range",
-          "restrict_in": "🛡️ Inbound IP Restrictions"
-        },
-        "data_description": {
-          "name": "A unique name for this proxy instance (e.g., 'external-api', 'development', 'restricted')",
-          "restrict_out": "Controls which destinations this proxy can access",
-          "restrict_out_custom": "Required when 'Custom CIDR range' is selected above. Use CIDR notation (e.g., 10.0.0.0/8, 203.0.113.0/24)",
-          "restrict_in": "Optional: Limit which client IPs can use this proxy (CIDR format, e.g., 192.168.1.0/24)"
+          "name": "Endpoint Name",
+          "restrict_out": "Outbound Access Restrictions",
+          "restrict_out_cidrs": "Custom CIDR Range",
+          "restrict_in_cidrs": "Inbound IP Restrictions (Optional)"
         }
       }
     },
     "error": {
-      "name_required": "❌ Instance name is required",
-      "name_exists": "❌ An instance with this name already exists. Please choose a different name.",
-      "invalid_cidr": "❌ Invalid CIDR notation. Please use format like 192.168.1.0/24 or 10.0.0.0/8",
-      "custom_cidr_required": "❌ Custom CIDR range is required when 'Custom CIDR range' is selected above"
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "invalid_name": "Invalid name - must be at least 2 characters",
+      "invalid_cidr": "Invalid CIDR format",
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
+      "unknown": "[%key:common::config_flow::error::unknown%]"
     },
     "abort": {
-      "already_configured": "This instance is already configured"
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "⚙️ Configure Homie Proxy Instance",
-        "description": "Choose what you want to configure:",
-        "menu_options": {
-          "restrictions": "🌐 Access Restrictions",
-          "tokens": "🔑 Manage Tokens"
-        }
-      },
-      "restrictions": {
-        "title": "🌐 Configure Access Restrictions",
-        "description": "Update access controls for **{current_name}**\n\n**Outbound Restrictions:**\n• **Allow all destinations** - No restrictions on target URLs\n• **Private networks only** - {private_networks}\n• **Local network only** - {local_network}\n• **Custom CIDR range** - Specify your own network range",
-        "data": {
-          "restrict_out": "🌐 Outbound Restrictions",
-          "restrict_out_custom": "📋 Custom CIDR Range",
-          "restrict_in": "🛡️ Inbound IP Restrictions"
-        },
-        "data_description": {
-          "restrict_out": "Controls which destinations this proxy can access",
-          "restrict_out_custom": "Required when 'Custom CIDR range' is selected above. Use CIDR notation (e.g., 10.0.0.0/8, 203.0.113.0/24)",
-          "restrict_in": "Optional: Limit which client IPs can use this proxy (CIDR format, e.g., 192.168.1.0/24)"
-        }
-      },
-      "tokens": {
-        "title": "🔑 Manage Access Tokens",
-        "description": "**Current Tokens ({token_count}):**\n\n{current_tokens}\n\nChoose an action:",
-        "data": {
-          "action": "Action"
-        }
-      },
-      "add_token": {
-        "title": "🔑 Add New Access Token",
-        "description": "A new access token will be generated:\n\n**New Token:** `{new_token}`\n\n**New Endpoint:** `{new_endpoint}`\n\nConfirm to add this token to your instance.",
-        "data": {
-          "confirm": "Confirm Add Token"
-        }
-      },
-      "remove_token": {
-        "title": "🗑️ Remove Access Token",
-        "description": "**Warning:** Removing a token will immediately disable access for any applications using it.\n\nCurrently managing {token_count} token(s). Select the token to remove:",
-        "data": {
-          "token_to_remove": "Token to Remove"
-        }
-      }
-    },
-    "error": {
-      "invalid_cidr": "❌ Invalid CIDR notation. Please use format like 192.168.1.0/24 or 10.0.0.0/8",
-      "custom_cidr_required": "❌ Custom CIDR range is required when 'Custom CIDR range' is selected above"
-    },
-    "abort": {
-      "no_tokens": "No tokens available to remove. Add a token first."
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
     }
   }
 } 

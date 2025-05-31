@@ -57,7 +57,7 @@ def main():
     print("🧪 Testing Client IP Access Control...")
     print("-" * 40)
     
-    # Test 1: Default instance - should allow localhost (no restrict_access_to_cidrs specified)
+    # Test 1: Default instance - should allow localhost (no restrict_in_cidrs specified)
     tests_total += 1
     if test_request('default', 'https://httpbin.org/get', 'your-secret-token-here', 200, 
                    "Default instance - localhost access (no CIDR restrictions)"):
@@ -82,31 +82,31 @@ def main():
     # Test 4: Default instance (both) - should allow external URLs
     tests_total += 1
     if test_request('default', 'https://httpbin.org/get', 'your-secret-token-here', 200,
-                   "Default instance - external URL (allowed_networks_out=both)"):
+                   "Default instance - external URL (restrict_out=both)"):
         tests_passed += 1
     
     # Test 5: External instance - should allow external URLs  
     tests_total += 1
     if test_request('external-only', 'https://httpbin.org/get', 'external-token-123', 200,
-                   "External instance - external URL (allowed_networks_out=external)"):
+                   "External instance - external URL (restrict_out=external)"):
         tests_passed += 1
     
     # Test 6: External instance - should deny internal URLs (localhost)
     tests_total += 1
     if test_request('external-only', 'http://127.0.0.1:80/test', 'external-token-123', 403,
-                   "External instance - internal URL denied (allowed_networks_out=external)"):
+                   "External instance - internal URL denied (restrict_out=external)"):
         tests_passed += 1
     
     # Test 7: Internal instance - should allow internal URLs (localhost)
     tests_total += 1
     if test_request('internal-only', 'http://127.0.0.1:8080/test', None, 200,
-                   "Internal instance - localhost URL (allowed_networks_out=internal)"):
+                   "Internal instance - localhost URL (restrict_out=internal)"):
         tests_passed += 1
     
     # Test 8: Internal instance - should deny external URLs
     tests_total += 1
     if test_request('internal-only', 'https://httpbin.org/get', None, 403,
-                   "Internal instance - external URL denied (allowed_networks_out=internal)"):
+                   "Internal instance - external URL denied (restrict_out=internal)"):
         tests_passed += 1
     
     # Test 9: Test private IP ranges (internal)
@@ -119,16 +119,16 @@ def main():
     print("🧪 Testing Custom Network CIDRs...")
     print("-" * 40)
     
-    # Test 10: Custom networks - should allow 1.1.1.1 (in allowed_networks_out_cidrs)
+    # Test 10: Custom networks - should allow 1.1.1.1 (in restrict_out_cidrs)
     tests_total += 1
     if test_request('both-test', 'https://1.1.1.1/test', 'your-secret-token-here', 200,
-                   "Both-test instance - 1.1.1.1 allowed (in allowed_networks_out_cidrs)"):
+                   "Both-test instance - 1.1.1.1 allowed (in restrict_out_cidrs)"):
         tests_passed += 1
     
-    # Test 11: Custom networks - should deny httpbin.org (not in allowed_networks_out_cidrs)
+    # Test 11: Custom networks - should deny httpbin.org (not in restrict_out_cidrs)
     tests_total += 1
     if test_request('both-test', 'https://httpbin.org/get', 'your-secret-token-here', 403,
-                   "Both-test instance - httpbin.org denied (not in allowed_networks_out_cidrs)"):
+                   "Both-test instance - httpbin.org denied (not in restrict_out_cidrs)"):
         tests_passed += 1
     
     # Test 12: Custom networks instance - should allow 8.8.8.8 (in 8.8.8.0/24)
@@ -140,7 +140,7 @@ def main():
     # Test 13: Custom networks - should deny external URL not in CIDRs
     tests_total += 1
     if test_request('custom-networks', 'https://httpbin.org/get', 'custom-token', 403,
-                   "Custom networks - httpbin.org denied (not in allowed_networks_out_cidrs)"):
+                   "Custom networks - httpbin.org denied (not in restrict_out_cidrs)"):
         tests_passed += 1
     
     # Test 14: Test authentication on custom-networks instance

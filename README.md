@@ -87,25 +87,25 @@ Edit `proxy_config.json`:
 {
   "instances": {
     "default": {
-      "allowed_networks_out": "both",
+      "restrict_out": "both",
       "tokens": ["your-secret-token-here"],
-      "restrict_access_to_cidrs": []
+      "restrict_in_cidrs": []
     },
     "external-only": {
-      "allowed_networks_out": "external",
+      "restrict_out": "external",
       "tokens": ["external-token-123"],
-      "restrict_access_to_cidrs": ["192.168.1.0/24", "10.0.0.0/8"]
+      "restrict_in_cidrs": ["192.168.1.0/24", "10.0.0.0/8"]
     },
     "internal-only": {
-      "allowed_networks_out": "internal", 
+      "restrict_out": "internal", 
       "tokens": [],
-      "restrict_access_to_cidrs": []
+      "restrict_in_cidrs": []
     },
     "custom-networks": {
-      "allowed_networks_out": "both",
-      "allowed_networks_out_cidrs": ["8.8.8.0/24", "1.1.1.0/24", "192.168.0.0/16"],
+      "restrict_out": "both",
+      "restrict_out_cidrs": ["8.8.8.0/24", "1.1.1.0/24", "192.168.0.0/16"],
       "tokens": ["custom-token"],
-      "restrict_access_to_cidrs": []
+      "restrict_in_cidrs": []
     }
   }
 }
@@ -113,19 +113,19 @@ Edit `proxy_config.json`:
 
 ### Configuration Options
 
-**`allowed_networks_out`** - Controls which target networks the proxy can reach:
+**`restrict_out`** - Controls which target networks the proxy can reach:
 - `"external"`: Only external/public IPs (denies private/internal IPs like 192.168.x.x, 10.x.x.x, 172.16-31.x.x)
 - `"internal"`: Only internal/private IPs (allows only 192.168.x.x, 10.x.x.x, 172.16-31.x.x, 127.x.x.x)  
 - `"both"`: Allow all IPs (0.0.0.0/0 - no restrictions)
 
-**`allowed_networks_out_cidrs`** - Specific CIDR ranges for outbound access:
-- If specified: Only allow requests to these specific CIDR ranges (overrides `allowed_networks_out`)
-- If empty/not specified: Use `allowed_networks_out` mode
+**`restrict_out_cidrs`** - Specific CIDR ranges for outbound access:
+- If specified: Only allow requests to these specific CIDR ranges (overrides `restrict_out`)
+- If empty/not specified: Use `restrict_out` mode
 - Provides fine-grained control over exactly which networks can be accessed
 
-**`restrict_access_to_cidrs`** - Controls which client IPs can access this proxy instance:
+**`restrict_in_cidrs`** - Controls which client IPs can access this proxy instance:
 - If specified: Only allow requests from these CIDR ranges
-- If empty/not specified: Only allow local IPs (127.0.0.1, private networks)
+- If empty/not specified: Allow all IPs (0.0.0.0/0 - no restrictions)
 
 **`tokens`** - Authentication tokens required for this instance:
 - If empty: No authentication required

@@ -90,17 +90,33 @@ run_test() {
     local expected_status="$3"
     local description="$4"
     local method="${5:-GET}"  # Default to GET if no method specified
+    local timeout="${6:-6}"   # Default 6 second timeout
     
     TESTS_TOTAL=$((TESTS_TOTAL + 1))
     
     echo "Test $TESTS_TOTAL: $test_name"
     echo "URL: $url"
     
-    # Make the request and capture status code with appropriate method
+    # Make the request and capture status code with appropriate method and timeout
     if [[ "$method" == "HEAD" ]]; then
-        response=$(curl -s -w "HTTPSTATUS:%{http_code}" -I "$url" 2>/dev/null)
+        response=$(timeout $timeout curl -s -w "HTTPSTATUS:%{http_code}" -I "$url" 2>/dev/null)
+        curl_exit_code=$?
     else
-        response=$(curl -s -w "HTTPSTATUS:%{http_code}" -X "$method" "$url" 2>/dev/null)
+        response=$(timeout $timeout curl -s -w "HTTPSTATUS:%{http_code}" -X "$method" "$url" 2>/dev/null)
+        curl_exit_code=$?
+    fi
+    
+    # Check if the command timed out or failed
+    if [[ $curl_exit_code -eq 124 ]]; then
+        echo "❌ FAIL: $description"
+        echo "   ERROR: Request timed out after ${timeout} seconds"
+        echo ""
+        return
+    elif [[ $curl_exit_code -ne 0 ]]; then
+        echo "❌ FAIL: $description"
+        echo "   ERROR: curl failed with exit code $curl_exit_code"
+        echo ""
+        return
     fi
     
     http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')

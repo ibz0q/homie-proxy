@@ -1,4 +1,4 @@
-"""Homie Proxy service for Home Assistant integration - using standalone proxy code."""
+"""Homie Proxy service for Home Assistant integration - using aiohttp for outbound requests and WebSocket support."""
 
 import logging
 import ipaddress
@@ -11,17 +11,11 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 try:
-    import requests
-    from requests.adapters import HTTPAdapter
-    import urllib3
-    from urllib3.exceptions import InsecureRequestWarning
-    # Note: SubjectAltNameWarning may not exist in newer urllib3 versions
-    try:
-        from urllib3.exceptions import SubjectAltNameWarning
-    except ImportError:
-        SubjectAltNameWarning = None
+    import aiohttp
+    import websockets
+    from websockets.exceptions import WebSocketException
 except ImportError:
-    raise ImportError("'requests' library is required for HomieProxy")
+    raise ImportError("'aiohttp' and 'websockets' libraries are required for HomieProxy")
 
 from homeassistant.core import HomeAssistant
 from homeassistant.components.http import HomeAssistantView
@@ -34,53 +28,6 @@ _LOGGER = logging.getLogger(__name__)
 
 # Global registry to track all instances
 _HOMIE_PROXY_INSTANCES = {}
-
-
-class CustomHTTPSAdapter(HTTPAdapter):
-    """Custom HTTPS adapter that allows selective TLS error ignoring"""
-    
-    def __init__(self, skip_tls_checks=None, *args, **kwargs):
-        self.skip_tls_checks = skip_tls_checks or []
-        super().__init__(*args, **kwargs)
-    
-    def init_poolmanager(self, *args, **kwargs):
-        # Configure SSL context based on ignored errors
-        ssl_context = ssl.create_default_context()
-        
-        # Check for ALL option - disables all TLS verification
-        if 'all' in [error.lower() for error in self.skip_tls_checks]:
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            kwargs['ssl_context'] = ssl_context
-            # Suppress all urllib3 warnings for ALL option
-            urllib3.disable_warnings(InsecureRequestWarning)
-            if SubjectAltNameWarning is not None:
-                urllib3.disable_warnings(SubjectAltNameWarning)
-        else:
-            # Handle specific TLS error types
-            if 'expired_cert' in self.skip_tls_checks:
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-            elif 'self_signed' in self.skip_tls_checks:
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-            elif 'hostname_mismatch' in self.skip_tls_checks:
-                ssl_context.check_hostname = False
-            elif 'cert_authority' in self.skip_tls_checks:
-                ssl_context.verify_mode = ssl.CERT_NONE
-            elif 'weak_cipher' in self.skip_tls_checks:
-                ssl_context.set_ciphers('ALL:@SECLEVEL=0')
-            
-            # If any TLS errors should be ignored, apply the configuration
-            if self.skip_tls_checks:
-                kwargs['ssl_context'] = ssl_context
-                # Suppress specific urllib3 warnings
-                if 'expired_cert' in self.skip_tls_checks or 'self_signed' in self.skip_tls_checks:
-                    urllib3.disable_warnings(InsecureRequestWarning)
-                if 'hostname_mismatch' in self.skip_tls_checks and SubjectAltNameWarning is not None:
-                    urllib3.disable_warnings(SubjectAltNameWarning)
-        
-        return super().init_poolmanager(*args, **kwargs)
 
 
 class ProxyInstance:
@@ -175,8 +122,103 @@ class ProxyInstance:
         return token in self.tokens
 
 
-def sync_proxy_request(proxy_instance: ProxyInstance, request_data: dict) -> dict:
-    """Synchronous proxy request function that runs in a thread executor"""
+def create_ssl_context(skip_tls_checks: List[str]) -> Optional[ssl.SSLContext]:
+    """Create SSL context based on TLS bypass options"""
+    if not skip_tls_checks:
+        return None
+    
+    # Check for ALL option - disables all TLS verification
+    if 'all' in [error.lower() for error in skip_tls_checks]:
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        _LOGGER.info("SSL Context: Ignoring ALL TLS errors - complete TLS verification disabled")
+        return ssl_context
+    
+    # Handle specific TLS error types
+    ssl_context = ssl.create_default_context()
+    context_modified = False
+    
+    # First, handle hostname checking (must be done BEFORE setting verify_mode to CERT_NONE)
+    if any(check in skip_tls_checks for check in ['hostname_mismatch', 'expired_cert', 'self_signed']):
+        ssl_context.check_hostname = False
+        context_modified = True
+    
+    # Then handle certificate verification
+    if any(check in skip_tls_checks for check in ['expired_cert', 'self_signed', 'cert_authority']):
+        ssl_context.verify_mode = ssl.CERT_NONE
+        context_modified = True
+        
+    if 'weak_cipher' in skip_tls_checks:
+        ssl_context.set_ciphers('ALL:@SECLEVEL=0')
+        context_modified = True
+    
+    if context_modified:
+        _LOGGER.info(f"SSL Context: Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
+        return ssl_context
+    
+    return None
+
+
+async def handle_websocket_proxy(proxy_instance: ProxyInstance, request_data: dict) -> dict:
+    """Handle WebSocket proxy connection"""
+    try:
+        target_url = request_data['target_url']
+        headers = request_data['headers']
+        query_params = request_data['query_params']
+        
+        # Convert HTTP(S) URL to WebSocket URL
+        if target_url.startswith('https://'):
+            ws_url = target_url.replace('https://', 'wss://', 1)
+        elif target_url.startswith('http://'):
+            ws_url = target_url.replace('http://', 'ws://', 1)
+        else:
+            return {'success': False, 'error': 'Invalid URL scheme for WebSocket', 'status': 400}
+        
+        # Configure SSL context for WebSocket
+        skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
+        ssl_context = None
+        if skip_tls_checks_param[0]:
+            skip_tls_value = skip_tls_checks_param[0].lower()
+            
+            if skip_tls_value in ['true', '1', 'yes']:
+                skip_tls_checks = ['all']
+            else:
+                skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
+            
+            ssl_context = create_ssl_context(skip_tls_checks)
+        
+        # Prepare WebSocket headers (exclude hop-by-hop headers)
+        ws_headers = {}
+        excluded_headers = {
+            'connection', 'upgrade', 'sec-websocket-key', 'sec-websocket-version',
+            'sec-websocket-protocol', 'sec-websocket-extensions', 'host'
+        }
+        
+        for header, value in headers.items():
+            if header.lower() not in excluded_headers:
+                ws_headers[header] = value
+        
+        # Add custom request headers
+        for key, values in query_params.items():
+            if key.startswith('request_headers[') and key.endswith(']'):
+                header_name = key[16:-1]
+                ws_headers[header_name] = values[0]
+        
+        return {
+            'success': True,
+            'websocket_url': ws_url,
+            'headers': ws_headers,
+            'ssl_context': ssl_context
+        }
+        
+    except Exception as e:
+        _LOGGER.error("WebSocket proxy setup error: %s", e)
+        return {'success': False, 'error': f"WebSocket setup error: {str(e)}", 'status': 500}
+
+
+async def async_proxy_request(proxy_instance: ProxyInstance, request_data: dict) -> dict:
+    """Async proxy request function using aiohttp"""
     try:
         client_ip = request_data['client_ip']
         method = request_data['method']
@@ -185,17 +227,9 @@ def sync_proxy_request(proxy_instance: ProxyInstance, request_data: dict) -> dic
         body = request_data['body']
         target_url = request_data['target_url']
         
-        # All the logging and validation has already been done
-        # This function just does the actual HTTP request
-        
-        # Prepare request session
-        session = requests.Session()
-        
-        # Clear any default User-Agent from the session
-        session.headers.pop('User-Agent', None)
-        
-        # Configure TLS error handling
+        # Configure TLS/SSL settings
         skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
+        ssl_context = None
         if skip_tls_checks_param[0]:
             skip_tls_value = skip_tls_checks_param[0].lower()
             
@@ -207,91 +241,86 @@ def sync_proxy_request(proxy_instance: ProxyInstance, request_data: dict) -> dic
                 # Parse comma-separated list of TLS errors to ignore
                 skip_tls_checks = [error.strip().lower() for error in skip_tls_value.split(',')]
             
-            # Check for ALL option - completely disable TLS verification
-            if 'all' in skip_tls_checks:
-                session.verify = False
-                urllib3.disable_warnings(InsecureRequestWarning)
-                if SubjectAltNameWarning is not None:
-                    urllib3.disable_warnings(SubjectAltNameWarning)
-                _LOGGER.info("Ignoring ALL TLS errors - complete TLS verification disabled")
-            else:
-                # Mount custom HTTPS adapter for specific error types
-                https_adapter = CustomHTTPSAdapter(skip_tls_checks=skip_tls_checks)
-                session.mount('https://', https_adapter)
-                _LOGGER.info(f"Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
+            ssl_context = create_ssl_context(skip_tls_checks)
         
         # Configure redirect following
         follow_redirects_param = query_params.get('follow_redirects', ['false'])
         follow_redirects = follow_redirects_param[0].lower() in ['true', '1', 'yes']
         
-        # Make the request
-        request_kwargs = {
-            'method': method,
-            'url': target_url,
-            'headers': headers,
-            'stream': True,
-            'timeout': 30,
-            'allow_redirects': follow_redirects
-        }
+        # Configure timeout
+        timeout = aiohttp.ClientTimeout(total=30)
         
-        # Add body for methods that support it
-        if body is not None:
-            request_kwargs['data'] = body
+        # Configure connector with SSL context
+        connector = aiohttp.TCPConnector(ssl=ssl_context) if ssl_context else None
         
         try:
-            response = session.request(**request_kwargs)
-            
-            # Prepare response headers - pass through all headers from target
-            response_headers = {}
-            excluded_response_headers = {
-                'connection', 'transfer-encoding', 'content-encoding'
-            }
-            
-            for header, value in response.headers.items():
-                if header.lower() not in excluded_response_headers:
-                    response_headers[header] = value
-            
-            # Add custom response headers
-            for key, values in query_params.items():
-                if key.startswith('response_header[') and key.endswith(']'):
-                    header_name = key[16:-1]  # Remove 'response_header[' and ']'
-                    response_headers[header_name] = values[0]
-            
-            # Return response object for streaming - don't buffer content
-            return {
-                'success': True,
-                'response': response,  # Return the response object itself
-                'status': response.status_code,
-                'headers': response_headers,
-                'session': session  # Keep session alive for streaming
-            }
+            # Create aiohttp session
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector
+            ) as session:
+                
+                # Make the request
+                request_kwargs = {
+                    'method': method,
+                    'url': target_url,
+                    'headers': headers,
+                    'allow_redirects': follow_redirects
+                }
+                
+                # Add body for methods that support it
+                if body is not None:
+                    request_kwargs['data'] = body
+                
+                async with session.request(**request_kwargs) as response:
                     
-        except requests.exceptions.RequestException as e:
-            session.close()
+                    # Prepare response headers - pass through all headers from target
+                    response_headers = {}
+                    excluded_response_headers = {
+                        'connection', 'transfer-encoding', 'content-encoding'
+                    }
+                    
+                    for header, value in response.headers.items():
+                        if header.lower() not in excluded_response_headers:
+                            response_headers[header] = value
+                    
+                    # Add custom response headers
+                    for key, values in query_params.items():
+                        if key.startswith('response_header[') and key.endswith(']'):
+                            header_name = key[16:-1]  # Remove 'response_header[' and ']'
+                            response_headers[header_name] = values[0]
+                    
+                    # Read all response data within the async context
+                    response_data = b''
+                    async for chunk in response.content.iter_chunked(65536):
+                        if chunk:
+                            response_data += chunk
+                    
+                    # Return response data that's fully read
+                    return {
+                        'success': True,
+                        'status': response.status,
+                        'headers': response_headers,
+                        'data': response_data,  # Fully read data
+                        'is_websocket': False
+                    }
+                    
+        except aiohttp.ClientError as e:
             return {'success': False, 'error': f"Bad Gateway: {str(e)}", 'status': 502}
                 
+        except asyncio.TimeoutError:
+            return {'success': False, 'error': "Gateway Timeout", 'status': 504}
+        
         except OSError as e:
-            session.close()
             return {'success': False, 'error': "Internal server error", 'status': 500}
         
     except Exception as e:
+        _LOGGER.error("Async proxy request error: %s", e)
         return {'success': False, 'error': "Internal server error", 'status': 500}
 
 
-async def stream_response_content(response, session):
-    """Async generator to stream response content"""
-    try:
-        # Stream in 64KB chunks for better performance with large files
-        for chunk in response.iter_content(chunk_size=65536):
-            if chunk:
-                yield chunk
-    finally:
-        # Always close the session when streaming is done
-        session.close()
-
-
 class HomieProxyRequestHandler:
-    """Request handler that mimics BaseHTTPRequestHandler but works with aiohttp"""
+    """Request handler that supports both HTTP and WebSocket proxying"""
     
     def __init__(self, proxy_instance: ProxyInstance):
         self.proxy_instance = proxy_instance
@@ -328,26 +357,108 @@ class HomieProxyRequestHandler:
             headers={'Content-Type': 'application/json'}
         )
     
+    def is_websocket_request(self, request: Request) -> bool:
+        """Check if request is a WebSocket upgrade request"""
+        connection = request.headers.get('Connection', '').lower()
+        upgrade = request.headers.get('Upgrade', '').lower()
+        return 'upgrade' in connection and upgrade == 'websocket'
+    
+    async def handle_websocket_request(self, request: Request, target_url: str, headers: dict, query_params: dict) -> web.Response:
+        """Handle WebSocket proxy request"""
+        try:
+            request_data = {
+                'target_url': target_url,
+                'headers': headers,
+                'query_params': query_params
+            }
+            
+            # Get WebSocket configuration
+            ws_result = await handle_websocket_proxy(self.proxy_instance, request_data)
+            if not ws_result['success']:
+                return self.send_error_response(ws_result['status'], ws_result['error'])
+            
+            ws_url = ws_result['websocket_url']
+            ws_headers = ws_result['headers']
+            ssl_context = ws_result['ssl_context']
+            
+            # Prepare WebSocket response
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            
+            self.log_message(f"WebSocket upgrade: Connecting to {ws_url}")
+            
+            # Create connection to target WebSocket
+            try:
+                # Configure websockets connection parameters
+                connect_kwargs = {
+                    'extra_headers': ws_headers,
+                }
+                if ssl_context:
+                    connect_kwargs['ssl'] = ssl_context
+                
+                async with websockets.connect(ws_url, **connect_kwargs) as target_ws:
+                    self.log_message(f"WebSocket connected to target: {ws_url}")
+                    
+                    # Create bidirectional message relay
+                    async def relay_client_to_target():
+                        try:
+                            async for msg in ws:
+                                if msg.type == aiohttp.WSMsgType.TEXT:
+                                    await target_ws.send(msg.data)
+                                elif msg.type == aiohttp.WSMsgType.BINARY:
+                                    await target_ws.send(msg.data)
+                                elif msg.type == aiohttp.WSMsgType.ERROR:
+                                    break
+                        except Exception as e:
+                            self.log_message(f"WebSocket relay client->target error: {e}")
+                    
+                    async def relay_target_to_client():
+                        try:
+                            async for msg in target_ws:
+                                if isinstance(msg, str):
+                                    await ws.send_str(msg)
+                                elif isinstance(msg, bytes):
+                                    await ws.send_bytes(msg)
+                        except Exception as e:
+                            self.log_message(f"WebSocket relay target->client error: {e}")
+                    
+                    # Run both relay tasks concurrently
+                    await asyncio.gather(
+                        relay_client_to_target(),
+                        relay_target_to_client(),
+                        return_exceptions=True
+                    )
+                    
+                    self.log_message("WebSocket connection closed")
+                    
+            except WebSocketException as e:
+                self.log_message(f"WebSocket connection failed: {e}")
+                await ws.close(code=aiohttp.WSMsgType.CLOSE, message=f"Target connection failed: {str(e)}".encode())
+            except Exception as e:
+                self.log_message(f"WebSocket error: {e}")
+                await ws.close(code=aiohttp.WSMsgType.CLOSE, message=f"Connection error: {str(e)}".encode())
+            
+            return ws
+            
+        except Exception as e:
+            self.log_message(f"WebSocket proxy error: {e}")
+            return self.send_error_response(500, "WebSocket proxy error")
+    
     async def handle_request(self, request: Request, method: str) -> web.Response:
-        """Main request handler - uses method parameter for HTTP method"""
+        """Main request handler - supports both HTTP and WebSocket"""
         try:
             client_ip = self.get_client_ip(request)
             
             # Check IP access
             if not self.proxy_instance.is_client_access_allowed(client_ip):
                 self.log_message(f"Client IP access denied: {client_ip} not allowed for instance '{self.proxy_instance.name}'")
-                if self.proxy_instance.restrict_in_cidrs:
-                    allowed_cidrs_str = ', '.join(str(cidr) for cidr in self.proxy_instance.restrict_in_cidrs)
-                    self.log_message(f"Instance allowed CIDRs: {allowed_cidrs_str}")
-                else:
-                    self.log_message("Instance has no restrict_in_cidrs specified - allowing all IPs (0.0.0.0/0)")
                 return self.send_error_response(403, "Access denied from your IP")
             
             self.log_message(f"Client IP access allowed: {client_ip} for instance '{self.proxy_instance.name}'")
             
             # Parse query parameters
             query_params = dict(request.query)
-            # Convert single values to lists for compatibility with standalone code
+            # Convert single values to lists for compatibility
             for key, value in query_params.items():
                 if isinstance(value, str):
                     query_params[key] = [value]
@@ -361,42 +472,20 @@ class HomieProxyRequestHandler:
             
             # Check target URL access
             if not self.proxy_instance.is_target_url_allowed(target_url):
-                if self.proxy_instance.restrict_out_cidrs:
-                    cidrs_str = ', '.join(str(cidr) for cidr in self.proxy_instance.restrict_out_cidrs)
-                    self.log_message(f"Target URL access denied: {target_url} not in restrict_out_cidrs '{cidrs_str}'")
-                else:
-                    self.log_message(f"Target URL access denied: {target_url} not allowed for restrict_out '{self.proxy_instance.restrict_out}'")
+                self.log_message(f"Target URL access denied: {target_url}")
                 return self.send_error_response(403, "Access denied to the target URL")
             
-            if self.proxy_instance.restrict_out_cidrs:
-                cidrs_str = ', '.join(str(cidr) for cidr in self.proxy_instance.restrict_out_cidrs)
-                self.log_message(f"Target URL access allowed: {target_url} matches restrict_out_cidrs '{cidrs_str}'")
-            else:
-                self.log_message(f"Target URL access allowed: {target_url} for restrict_out '{self.proxy_instance.restrict_out}'")
+            self.log_message(f"Target URL access allowed: {target_url}")
             
             # Check authentication
             tokens = query_params.get('token', [])
             token = tokens[0] if tokens else None
             
-            # Check if token is valid
             if not self.proxy_instance.is_token_valid(token):
-                self.log_message(f"Authentication failed: Invalid token '{token}' for instance '{self.proxy_instance.name}'")
-                if self.proxy_instance.tokens:
-                    self.log_message(f"Valid tokens for this instance: {len(self.proxy_instance.tokens)} configured")
-                else:
-                    self.log_message("No tokens configured for this instance - all requests will be denied")
+                self.log_message(f"Authentication failed: Invalid token for instance '{self.proxy_instance.name}'")
                 return self.send_error_response(401, "Invalid or missing authentication token")
             
             self.log_message(f"Authentication successful for instance '{self.proxy_instance.name}'")
-            
-            # Get request body for methods that might have a body
-            body = None
-            if method in ['POST', 'PUT', 'PATCH']:
-                try:
-                    body = await request.read()
-                except Exception as e:
-                    _LOGGER.error("Failed to read request body: %s", e)
-                    return self.send_error_response(400, "Failed to read request body")
             
             # Handle Host header override logic
             override_host_header_param = query_params.get('override_host_header', [''])
@@ -409,65 +498,53 @@ class HomieProxyRequestHandler:
             # Prepare headers - start with original headers from client
             headers = dict(request.headers)
             
-            # Add custom request headers first (so they can override defaults)
+            # Add custom request headers first
             for key, values in query_params.items():
                 if key.startswith('request_headers[') and key.endswith(']'):
-                    header_name = key[16:-1]  # Remove 'request_headers[' and ']'
+                    header_name = key[16:-1]
                     headers[header_name] = values[0]
             
-            # Handle Host header logic AFTER custom headers so override takes precedence
+            # Handle Host header logic
             if override_host_header:
-                # Use explicit override
                 headers['Host'] = override_host_header
                 self.log_message(f"Override Host header set to: {override_host_header}")
             elif original_hostname:
-                # Check if the hostname is an IP address
                 try:
                     ipaddress.ip_address(original_hostname)
-                    # It's an IP address - don't set Host header
                     headers.pop('Host', None)
                     self.log_message(f"Target is IP address ({original_hostname}) - no Host header set")
                 except ValueError:
-                    # It's a hostname - set Host header to hostname only (no port)
                     headers['Host'] = original_hostname
                     self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
             
-            # Always ensure User-Agent is explicitly set (use blank if none provided)
-            user_agent_set = False
-            for header_name in headers.keys():
-                if header_name.lower() == 'user-agent':
-                    user_agent_set = True
-                    break
-            
+            # Ensure User-Agent is set
+            user_agent_set = any(header.lower() == 'user-agent' for header in headers.keys())
             if not user_agent_set:
                 headers['User-Agent'] = ''
-                self.log_message("Setting blank User-Agent (no User-Agent provided)")
-            else:
-                self.log_message(f"User-Agent already provided: {headers.get('User-Agent', headers.get('user-agent', 'NOT FOUND'))}")
+                self.log_message("Setting blank User-Agent")
             
-            # Log the request details
-            self.log_message(f"REQUEST to {target_url}")
-            self.log_message(f"Request method: {method}")
-            if headers:
-                self.log_message("Request headers being sent to target:")
-                for header_name, header_value in headers.items():
-                    # Truncate very long header values for readability
-                    if len(str(header_value)) > 100:
-                        display_value = str(header_value)[:97] + "..."
-                    else:
-                        display_value = header_value
-                    self.log_message(f"  {header_name}: {display_value}")
-            else:
-                self.log_message("No custom headers being sent to target")
+            # Check for WebSocket upgrade request
+            if self.is_websocket_request(request):
+                self.log_message(f"WebSocket upgrade request detected for {target_url}")
+                return await self.handle_websocket_request(request, target_url, headers, query_params)
             
+            # Handle regular HTTP request
+            # Get request body for methods that might have a body
+            body = None
+            if method in ['POST', 'PUT', 'PATCH']:
+                try:
+                    body = await request.read()
+                except Exception as e:
+                    _LOGGER.error("Failed to read request body: %s", e)
+                    return self.send_error_response(400, "Failed to read request body")
+            
+            # Log request details
+            self.log_message(f"HTTP {method} REQUEST to {target_url}")
             if body:
                 body_size = len(body)
-                if body_size > 1024:
-                    self.log_message(f"Request body: {body_size} bytes")
-                else:
-                    self.log_message(f"Request body: {body_size} bytes - {body[:100]}{'...' if len(body) > 100 else ''}")
+                self.log_message(f"Request body: {body_size} bytes")
             
-            # Prepare data for the synchronous function
+            # Prepare data for the async proxy request
             request_data = {
                 'client_ip': client_ip,
                 'method': method,
@@ -477,55 +554,22 @@ class HomieProxyRequestHandler:
                 'target_url': target_url
             }
             
-            # Run the synchronous proxy request in a thread executor
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, 
-                sync_proxy_request, 
-                self.proxy_instance, 
-                request_data
-            )
+            # Make the async proxy request
+            result = await async_proxy_request(self.proxy_instance, request_data)
             
             if result['success']:
-                # For successful responses, create a streaming response
-                response_obj = result['response']
-                session = result['session']
+                # For successful responses, create a simple response with the data
+                response_data = result['data']
                 
-                # Create a streaming response
-                stream_response = web.StreamResponse(
+                bytes_transferred = len(response_data) if response_data else 0
+                self.log_message(f"Sending response: {bytes_transferred} bytes")
+                
+                # Create a simple response since we already have all the data
+                return web.Response(
+                    body=response_data,
                     status=result['status'],
                     headers=result['headers']
                 )
-                
-                # Prepare the streaming response
-                await stream_response.prepare(request)
-                
-                bytes_transferred = 0
-                try:
-                    # Stream content in chunks using thread executor
-                    loop = asyncio.get_event_loop()
-                    
-                    # Create iterator once
-                    content_iter = response_obj.iter_content(chunk_size=65536)
-                    
-                    while True:
-                        # Get next chunk in thread executor to avoid blocking
-                        try:
-                            chunk = await loop.run_in_executor(None, lambda: next(content_iter, None))
-                            if chunk is None:
-                                break
-                            await stream_response.write(chunk)
-                            bytes_transferred += len(chunk)
-                        except StopIteration:
-                            break
-                    
-                    self.log_message(f"Streamed {bytes_transferred} bytes successfully")
-                    
-                finally:
-                    # Always close the session when done
-                    session.close()
-                
-                return stream_response
             else:
                 return self.send_error_response(result['status'], result['error'])
             
@@ -558,7 +602,7 @@ class HomieProxyService:
         """Set up the proxy service."""
         _LOGGER.info("Setting up Homie Proxy service: %s", self.name)
         
-        # Create proxy instance using standalone proxy logic
+        # Create proxy instance
         self.proxy_instance = ProxyInstance(
             name=self.name,
             tokens=self.tokens,
@@ -582,7 +626,7 @@ class HomieProxyService:
         self.hass.http.register_view(self.view)
         
         _LOGGER.info(
-            "Homie Proxy service '%s' is ready at /api/homie_proxy/%s with %d token(s)", 
+            "Homie Proxy service '%s' is ready at /api/homie_proxy/%s with %d token(s) and WebSocket support", 
             self.name, self.name, len(self.tokens)
         )
 
@@ -627,13 +671,10 @@ class HomieProxyService:
         
         # Remove from global registry
         _HOMIE_PROXY_INSTANCES.pop(self.name, None)
-        
-        # Note: Home Assistant doesn't provide a way to unregister views
-        # The view will be cleaned up when HA restarts
 
 
 class HomieProxyView(HomeAssistantView):
-    """HTTP view for Homie Proxy using standalone proxy code."""
+    """HTTP view for Homie Proxy with aiohttp and WebSocket support."""
 
     def __init__(self, proxy_instance: ProxyInstance):
         """Initialize the view."""
@@ -646,7 +687,7 @@ class HomieProxyView(HomeAssistantView):
         self.requires_auth = False  # We handle auth with tokens
 
     async def get(self, request: Request) -> web.Response:
-        """Handle GET request."""
+        """Handle GET request (including WebSocket upgrades)."""
         return await self.handler.handle_request(request, "GET")
 
     async def post(self, request: Request) -> web.Response:
@@ -675,7 +716,7 @@ class HomieProxyDebugView(HomeAssistantView):
     
     url = "/api/homie_proxy/debug"
     name = "api:homie_proxy:debug"
-    requires_auth = False  # For debugging, but could be secured if needed
+    requires_auth = False
     
     async def get(self, request: Request) -> web.Response:
         """Handle GET request for debug information."""
@@ -688,11 +729,12 @@ class HomieProxyDebugView(HomeAssistantView):
         for instance_name, service in _HOMIE_PROXY_INSTANCES.items():
             debug_info["instances"][instance_name] = {
                 "name": service.name,
-                "tokens": service.tokens,  # Show full tokens
+                "tokens": service.tokens,
                 "restrict_out": service.restrict_out,
                 "restrict_in": service.restrict_in,
                 "endpoint_url": f"/api/homie_proxy/{service.name}",
-                "status": "active" if service.view else "inactive"
+                "status": "active" if service.view else "inactive",
+                "websocket_support": True
             }
         
         # Add system information
@@ -700,7 +742,16 @@ class HomieProxyDebugView(HomeAssistantView):
             "private_cidrs": PRIVATE_CIDRS,
             "local_cidrs": LOCAL_CIDRS,
             "available_restrictions": ["any", "external", "internal", "custom"],
-            "proxy_implementation": "standalone_proxy_code_with_thread_executor"
+            "proxy_implementation": "aiohttp_with_websocket_support",
+            "features": [
+                "HTTP/HTTPS proxying",
+                "WebSocket proxying", 
+                "Streaming support",
+                "Custom headers",
+                "TLS bypass options",
+                "Authentication",
+                "Network access control"
+            ]
         }
         
         # Format as pretty JSON

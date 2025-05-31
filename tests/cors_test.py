@@ -2,16 +2,28 @@
 
 import requests
 import json
+import argparse
+import os
+
+# Parse command line arguments or use environment variable
+parser = argparse.ArgumentParser(description='Test reverse proxy CORS headers')
+parser.add_argument('--port', type=int, 
+                   default=int(os.environ.get('PROXY_PORT', 8080)),
+                   help='Proxy server port (default: 8080, or PROXY_PORT env var)')
+args = parser.parse_args()
 
 print("=" * 60)
 print("CORS HEADERS TEST - REVERSE PROXY")
 print("=" * 60)
 
+print(f"\nTesting proxy at localhost:{args.port}")
+print("-" * 50)
+
 print("\n📋 HOW TO SET CORS HEADERS VIA REVERSE PROXY:")
 print("-" * 50)
 
 # Show the exact URL structure for setting CORS headers
-base_url = "http://localhost:8080/default?token=your-secret-token-here"
+base_url = f"http://localhost:{args.port}/default?token=your-secret-token-here"
 target_url = "https://httpbin.org/get"
 
 # Example 1: Basic CORS header

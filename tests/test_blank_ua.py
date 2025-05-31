@@ -2,12 +2,24 @@
 
 import requests
 import json
+import argparse
+import os
+
+# Parse command line arguments or use environment variable
+parser = argparse.ArgumentParser(description='Test reverse proxy User-Agent handling')
+parser.add_argument('--port', type=int, 
+                   default=int(os.environ.get('PROXY_PORT', 8080)),
+                   help='Proxy server port (default: 8080, or PROXY_PORT env var)')
+args = parser.parse_args()
 
 print("=" * 60)
 print("BLANK USER-AGENT DEFAULT TEST")
 print("=" * 60)
 
-base_url = "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get"
+base_url = f"http://localhost:{args.port}/default?token=your-secret-token-here&url=https://httpbin.org/get"
+
+print(f"\nTesting proxy at localhost:{args.port}")
+print("-" * 50)
 
 # Test 1: No User-Agent provided (should be blank now)
 print("\n🔸 Test 1: No User-Agent provided")

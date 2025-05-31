@@ -1,36 +1,40 @@
-# Modern Python Reverse Proxy
+# Homie Proxy
 
-A clean, modern Python reverse proxy server with minimal dependencies that supports configurable instances, authentication, IP restrictions, and programmable request/response handling.
+A minimal, high-performance HTTP/HTTPS proxy server built in Python with threading support for concurrent connections.
 
 ## Features
 
-- **Multiple Proxy Instances**: Configure multiple named proxy instances with different settings
-- **Concurrent Connections**: Multi-threaded server supports simultaneous requests without blocking
-- **IP Access Control**: Restrict access to local/external networks or specific CIDR ranges
-- **Token Authentication**: Secure your proxy instances with custom tokens
-- **TLS Bypass**: Option to skip TLS certificate verification
-- **Custom Headers**: Add custom request and response headers
-- **Redirect Following**: Control whether HTTP redirects are followed
-- **All HTTP Methods**: Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
-- **Video/Large File Streaming**: Efficient streaming of large files without blocking other requests
-- **Minimal Dependencies**: Only requires the `requests` library
+- 🚀 **Multi-threading** - ThreadingHTTPServer for concurrent request handling
+- 🔐 **TLS Bypass** - Configurable TLS error ignoring (self-signed certs, etc.)
+- 🎯 **Instance-based routing** - Multiple proxy configurations in one server
+- 🔑 **Token authentication** - Secure access control per instance
+- 🌐 **IP-based access control** - Local/external/CIDR restrictions
+- 📝 **Custom headers** - Add/modify request and response headers
+- 🔄 **Redirect control** - Enable/disable redirect following
+- 📊 **Detailed logging** - Request/response header and body logging
+- ⚡ **Streaming support** - Direct streaming for large files and videos
+- 🎬 **Video friendly** - Optimized for video file proxying
 
-## Installation
+## Quick Start
 
-1. Clone or download the script
-2. Install dependencies:
+### 1. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Run the proxy:
+### 2. Run the Server
 ```bash
-python reverse_proxy.py
+python homie_proxy.py --port 8080
+```
+
+### 3. Make a Request
+```bash
+curl "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get"
 ```
 
 ## Configuration
 
-The proxy server is configured via `proxy_config.json`. Here's the configuration structure:
+The server uses `proxy_config.json` for configuration:
 
 ```json
 {
@@ -41,209 +45,182 @@ The proxy server is configured via `proxy_config.json`. Here's the configuration
       "allowed_cidrs": []
     },
     "internal": {
-      "access_mode": "local",
-      "tokens": [],
-      "allowed_cidrs": ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
-    }
-  }
-}
-```
-
-#### Instance Configuration Options
-
-- **access_mode**: 
-  - `"local"`: Only allow private IP addresses (Class A, B, C)
-  - `"external"`: Only allow public IP addresses
-  - `"both"`: Allow all IP addresses (default)
-
-- **tokens**: Array of valid authentication tokens. If empty, no authentication required.
-
-- **allowed_cidrs**: Array of CIDR ranges to restrict access to specific networks
-
-### Example Configuration
-
-```json
-{
-  "instances": {
-    "public": {
-      "access_mode": "both",
-      "tokens": ["abc123", "def456"],
-      "allowed_cidrs": []
-    },
-    "internal": {
-      "access_mode": "local",
+      "access_mode": "local", 
       "tokens": [],
       "allowed_cidrs": ["192.168.0.0/16", "10.0.0.0/8"]
-    },
-    "development": {
-      "access_mode": "local",
-      "tokens": [],
-      "allowed_cidrs": ["127.0.0.0/8"]
     }
   }
 }
 ```
 
-## Usage
+### Instance Settings
 
-### Basic Usage
+- **access_mode**: `local`, `external`, or `both`
+- **tokens**: Array of valid authentication tokens (empty = no auth required)
+- **allowed_cidrs**: IP ranges allowed to access this instance
+
+## Usage Examples
+
+### Basic Request
+```bash
+curl "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get"
+```
+
+### Custom Request Headers
+```bash
+curl "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/headers&request_headers[User-Agent]=MyBot/1.0&request_headers[X-Custom]=value"
+```
+
+### Custom Response Headers (CORS)
+```bash
+curl "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get&response_header[Access-Control-Allow-Origin]=*"
+```
+
+### TLS Error Bypass
+```bash
+# Ignore all TLS errors
+curl "http://localhost:8080/default?token=your-secret-token-here&url=https://self-signed.badssl.com&skip_tls_checks=all"
+
+# Ignore specific TLS errors
+curl "http://localhost:8080/default?token=your-secret-token-here&url=https://self-signed.badssl.com&skip_tls_checks=self_signed,expired_cert"
+```
+
+### Host Header Override
+```bash
+# For IP-based requests with custom Host header
+curl "http://localhost:8080/default?token=your-secret-token-here&url=http://192.168.1.100/api&override_host_header=myapi.example.com"
+```
+
+### POST with JSON Body
+```bash
+curl -X POST "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/post" \
+     -H "Content-Type: application/json" \
+     -d '{"name": "John", "age": 30}'
+```
+
+### Video Streaming
+```bash
+curl "http://localhost:8080/default?token=your-secret-token-here&url=https://example.com/video.mp4&skip_tls_checks=all" \
+     --output video.mp4
+```
+
+## URL Parameters
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `url` | Target URL to proxy (required) | `url=https://api.example.com/data` |
+| `token` | Authentication token | `token=your-secret-token-here` |
+| `skip_tls_checks` | TLS errors to ignore | `skip_tls_checks=all` or `skip_tls_checks=self_signed,expired_cert` |
+| `follow_redirects` | Enable redirect following | `follow_redirects=true` |
+| `override_host_header` | Override Host header | `override_host_header=api.example.com` |
+| `request_headers[Name]` | Add custom request header | `request_headers[Authorization]=Bearer token` |
+| `response_header[Name]` | Add custom response header | `response_header[Access-Control-Allow-Origin]=*` |
+
+## Host Header Behavior
+
+- **Hostnames**: Automatically sets Host header to hostname (no port)
+- **IP Addresses**: No Host header set by default
+- **Override**: Use `override_host_header` to force a specific Host header value
+
+## TLS Error Types
+
+- `all` - Ignore all TLS verification (not recommended for production)
+- `self_signed` - Allow self-signed certificates
+- `expired_cert` - Allow expired certificates  
+- `hostname_mismatch` - Allow hostname mismatches
+- `cert_authority` - Allow unknown certificate authorities
+- `weak_cipher` - Allow weak cipher suites
+
+## Command Line Options
 
 ```bash
-# Start the server (default: localhost:8080)
-python reverse_proxy.py
+python homie_proxy.py [options]
 
-# Start on custom host/port
-python reverse_proxy.py --host 0.0.0.0 --port 9000
-
-# Use custom config file
-python reverse_proxy.py --config my_config.json
+Options:
+  --host HOST      Host to bind to (default: 0.0.0.0)
+  --port PORT      Port to bind to (default: 8080)  
+  --config FILE    Configuration file (default: proxy_config.json)
 ```
 
-### Making Requests
+## Testing
 
-The proxy URL format is: `http://localhost:8080/INSTANCE_NAME?url=TARGET_URL&[options]`
-
-#### Basic Examples
+Run the comprehensive test suite:
 
 ```bash
-# Simple GET request through 'default' instance
-curl "http://localhost:8080/default?url=https://httpbin.org/get&token=your-secret-token-here"
+# Run all tests
+python run_tests.py --port 8080
 
-# POST request with JSON data
-curl -X POST -H "Content-Type: application/json" -d '{"name":"John","email":"john@example.com"}' \
-  "http://localhost:8080/default?url=https://httpbin.org/post&token=your-secret-token-here"
-
-# PUT request with data
-curl -X PUT -H "Content-Type: application/json" -d '{"id":1,"status":"updated"}' \
-  "http://localhost:8080/default?url=https://api.example.com/users/1&token=your-secret-token-here"
-
-# Granular TLS error handling
-curl "http://localhost:8080/default?url=https://self-signed.example.com&token=your-secret-token-here&skip_tls_checks=self_signed,hostname_mismatch"
-
-# Legacy TLS bypass (still works but use specific error types for better security)
-curl "http://localhost:8080/default?url=https://self-signed.badssl.com&skip_tls_checks=all&token=your-secret-token-here"
+# Run specific test
+python run_tests.py --port 8080 --test test_simple
 ```
 
-## Programmable Options
+Available tests:
+- `test_simple` - Basic functionality 
+- `test_blank_ua` - User-Agent handling
+- `test_concurrent_requests` - Concurrent request handling
+- `test_tls_all` - TLS bypass functionality
+- `cors_test` - CORS header injection
+- `test_host_header` - Host header correction
 
-### Query Parameters
+## Architecture
 
-- `url`: Target URL to proxy to (required)
-- `token`: Authentication token (required if tokens are configured)
-- `skip_tls_checks`: Comma-separated list of TLS errors to ignore, or `all` to bypass all SSL verification
-- `request_headers[HeaderName]`: Add custom request headers
-- `response_header[HeaderName]`: Add custom response headers
-- `dns_server[]`: Custom DNS servers for hostname resolution
-- `follow_redirects`: Enable/disable HTTP redirect following
+### Multi-threading
+- Uses `ThreadingHTTPServer` for concurrent request handling
+- Each request gets its own thread
+- No blocking between concurrent requests
+- Optimized for video streaming and large file downloads
 
-### TLS Error Types
+### Streaming
+- Direct streaming from target to client
+- 8KB chunk size for optimal performance
+- No buffering or caching
+- Supports HTTP range requests for video seeking
 
-The `skip_tls_checks` parameter accepts a comma-separated list of these error types:
+### Security
+- Token-based authentication per instance
+- IP address and CIDR-based access control  
+- Configurable TLS verification levels
+- Request/response header filtering options
 
-- `all`: Bypass all SSL certificate verification (complete TLS bypass)
-- `expired_cert`: Ignore expired certificates
-- `self_signed`: Ignore self-signed certificates  
-- `hostname_mismatch`: Ignore hostname/common name mismatches
-- `cert_authority`: Ignore untrusted certificate authority errors
-- `weak_cipher`: Allow weak cipher suites
+## Dependencies
 
-Examples:
-```bash
-# Bypass all TLS verification (not recommended for production)
-skip_tls_checks=all
+- **requests** >= 2.25.0 - HTTP client library
+- **Python** >= 3.7 - Core language requirements
 
-# Ignore specific error types
-skip_tls_checks=expired_cert,hostname_mismatch
+Minimal dependency footprint for easy deployment.
 
-# Ignore self-signed certificates only
-skip_tls_checks=self_signed
+## Development
 
-# Ignore multiple error types
-skip_tls_checks=expired_cert,self_signed,cert_authority
+### Project Structure
+```
+homie-proxy/
+├── homie_proxy.py      # Main proxy server
+├── proxy_config.json   # Configuration file
+├── requirements.txt    # Dependencies
+├── run_tests.py       # Test runner
+├── tests/             # Test suite
+│   ├── test_simple.py
+│   ├── test_blank_ua.py
+│   ├── cors_test.py
+│   └── ...
+├── README.md          # This file
+└── TESTING.md         # Testing guide
 ```
 
-### DNS Override
+### Adding Features
+1. Modify `HomieProxyHandler.handle_request()` for request processing
+2. Update URL parameter parsing for new options
+3. Add corresponding tests in the `tests/` directory
+4. Update documentation
 
-The proxy supports custom DNS servers for hostname resolution, useful for bypassing DNS filtering or using specific DNS providers:
+## Contributing
 
-```bash
-# Use Google DNS servers
-curl "http://localhost:8080/default?url=https://example.com&token=your-token&dns_server[]=8.8.8.8&dns_server[]=8.8.4.4"
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality  
+4. Update documentation
+5. Submit a pull request
 
-# Use Cloudflare DNS servers
-curl "http://localhost:8080/default?url=https://example.com&token=your-token&dns_server[]=1.1.1.1&dns_server[]=1.0.0.1"
+## License
 
-# Multiple DNS servers with fallback
-curl "http://localhost:8080/default?url=https://example.com&token=your-token&dns_server[]=9.9.9.9&dns_server[]=8.8.8.8&dns_server[]=1.1.1.1"
-```
-
-#### DNS Features:
-- **Multiple DNS servers**: Specify multiple servers for redundancy
-- **Automatic fallback**: If one DNS server fails, tries the next one
-- **Host header preservation**: Original hostname preserved for virtual hosting
-- **IP address caching**: Resolved IPs are used directly in requests
-- **Custom DNS logging**: Detailed logs show which DNS server resolved each hostname
-
-#### DNS Server Examples:
-- **Google DNS**: `8.8.8.8`, `8.8.4.4`
-- **Cloudflare DNS**: `1.1.1.1`, `1.0.0.1`
-- **OpenDNS**: `208.67.222.222`, `208.67.220.220`
-- **Quad9 DNS**: `9.9.9.9`, `149.112.112.112`
-
-## Concurrent Request Handling
-
-The reverse proxy uses `ThreadingHTTPServer` to handle multiple requests simultaneously:
-
-### Concurrency Features
-- **Multiple simultaneous connections**: Each request gets its own thread
-- **Non-blocking video/large file streaming**: Large downloads don't block other requests
-- **Thread-safe operations**: All operations are thread-safe
-
-### Performance Benefits
-```bash
-# These two large video files can download simultaneously
-# Request 1 (starts immediately):
-curl "http://localhost:8080/default?url=https://example.com/large-video.mp4&token=your-token&skip_tls_checks=all" &
-
-# Request 2 (also starts immediately, no waiting for Request 1):
-curl "http://localhost:8080/default?url=https://example.com/another-video.mp4&token=your-token&skip_tls_checks=all" &
-```
-
-### Concurrent Use Cases
-- **Multiple video streams**: Stream different videos to different clients simultaneously
-- **API + Video**: Small API requests don't wait for large file downloads
-- **Batch processing**: Multiple data requests can run in parallel
-- **Mixed workloads**: JSON APIs, file downloads, and streaming can all happen concurrently
-
-## Monitoring and Logging
-
-The proxy provides detailed logging with timestamps:
-
-```
-[2024-01-15 10:30:45] 192.168.1.100 - - [15/Jan/2024 10:30:45] "GET /default?url=https://httpbin.org/get HTTP/1.1" 200 -
-```
-
-Server startup shows loaded configuration:
-```
-Loaded 2 proxy instances
-Multi-threaded server - supports concurrent requests
-```
-
-## Error Responses
-
-All errors are returned as JSON:
-
-```json
-{
-  "error": "Invalid or missing token",
-  "code": 401,
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-Common error codes:
-- `400`: Bad Request (missing URL, invalid parameters)
-- `401`: Unauthorized (invalid or missing token)
-- `403`: Forbidden (IP access denied)
-- `404`: Not Found (instance not found)
-- `502`: Bad Gateway (target server error)
+This project is open source. Feel free to use, modify, and distribute.

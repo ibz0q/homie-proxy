@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Modern Python Reverse Proxy Server
+Homie Proxy Server
 Minimal dependencies, configurable instances with authentication and restrictions.
 """
 
@@ -122,8 +122,8 @@ class ProxyInstance:
         return token in self.tokens
 
 
-class ReverseProxyHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for the reverse proxy"""
+class HomieProxyHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for the homie proxy"""
     
     def __init__(self, *args, proxy_config=None, **kwargs):
         self.proxy_config = proxy_config or {}
@@ -254,38 +254,32 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             else:
                 self.log_message("Redirect following disabled (default)")
             
-            # Prepare headers
+            # Prepare headers - start with original headers from client
             headers = dict(self.headers)
             
-            # Remove hop-by-hop headers and proxy-specific headers
-            hop_by_hop = ['connection', 'keep-alive', 'proxy-authenticate', 
-                         'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']
-            proxy_headers = ['x-forwarded-for', 'x-real-ip', 'x-forwarded-proto', 'x-forwarded-host',
-                           'x-forwarded-port', 'x-forwarded-server', 'x-client-ip', 'x-originating-ip',
-                           'x-remote-ip', 'x-remote-addr', 'cf-connecting-ip', 'true-client-ip',
-                           'x-cluster-client-ip', 'fastly-client-ip', 'x-azure-clientip']
-            
-            for header in hop_by_hop + proxy_headers:
-                headers.pop(header, None)
-                headers.pop(header.lower(), None)  # Ensure case-insensitive removal
-            
-            # Add custom request headers first (so they can override defaults)
+            # Add custom request headers (so they can override defaults)
             for key, values in query_params.items():
                 if key.startswith('request_headers[') and key.endswith(']'):
                     header_name = key[16:-1]  # Remove 'request_headers[' and ']'
                     headers[header_name] = values[0]
             
-            # Fix Host header for proper virtual hosting
+            # Handle Host header logic
             parsed_target = urllib.parse.urlparse(target_url)
-            if parsed_target.hostname:
+            override_host_header = query_params.get('override_host_header', [None])[0]
+            
+            if override_host_header:
+                # Use explicit override
+                headers['Host'] = override_host_header
+                self.log_message(f"Override Host header set to: {override_host_header}")
+            elif parsed_target.hostname:
                 # Check if the hostname is an IP address
                 try:
                     ipaddress.ip_address(parsed_target.hostname)
-                    # It's an IP address - set Host header to the IP
-                    headers['Host'] = parsed_target.hostname
-                    self.log_message(f"Fixed Host header to IP: {headers['Host']}")
+                    # It's an IP address - don't set Host header
+                    headers.pop('Host', None)
+                    self.log_message(f"Target is IP address ({parsed_target.hostname}) - no Host header set")
                 except ValueError:
-                    # It's a hostname - always use just the hostname (no port for virtual hosts)
+                    # It's a hostname - set Host header to hostname only (no port)
                     headers['Host'] = parsed_target.hostname
                     self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
             
@@ -301,20 +295,6 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 self.log_message("Setting blank User-Agent (no User-Agent provided)")
             else:
                 self.log_message(f"User-Agent already provided: {headers.get('User-Agent', headers.get('user-agent', 'NOT FOUND'))}")
-            
-            # Ensure proper Content-Type for requests with body
-            if body and 'content-type' not in [h.lower() for h in headers.keys()]:
-                # Try to detect content type from the original request
-                original_content_type = self.headers.get('Content-Type')
-                if original_content_type:
-                    headers['Content-Type'] = original_content_type
-                elif self.command in ['POST', 'PUT', 'PATCH']:
-                    # Default to JSON if not specified for methods that typically send JSON
-                    try:
-                        json.loads(body.decode('utf-8'))
-                        headers['Content-Type'] = 'application/json'
-                    except:
-                        headers['Content-Type'] = 'application/octet-stream'
             
             # Make the request
             request_kwargs = {
@@ -372,10 +352,9 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             # Send response
             self.send_response(response.status_code)
             
-            # Send headers
+            # Send headers - pass through all headers from target
             for header, value in response.headers.items():
-                if header.lower() not in hop_by_hop:
-                    self.send_header(header, value)
+                self.send_header(header, value)
             
             # Add custom response headers
             for key, values in query_params.items():
@@ -385,7 +364,7 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             
             self.end_headers()
             
-            # Stream response data directly (no caching)
+            # Stream response data directly
             self.log_message("Streaming response directly")
             bytes_transferred = 0
             for chunk in response.iter_content(chunk_size=8192):
@@ -429,8 +408,8 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
         return self.client_address[0]
 
 
-class ReverseProxyServer:
-    """Main reverse proxy server"""
+class HomieProxyServer:
+    """Main homie proxy server"""
     
     def __init__(self, config_file: str = 'proxy_config.json'):
         self.config_file = config_file
@@ -482,7 +461,7 @@ class ReverseProxyServer:
     def create_handler(self):
         """Create a request handler with the current configuration"""
         def handler(*args, **kwargs):
-            return ReverseProxyHandler(*args, proxy_config=self.instances, **kwargs)
+            return HomieProxyHandler(*args, proxy_config=self.instances, **kwargs)
         return handler
     
     def run(self, host: str = '0.0.0.0', port: int = 8080):
@@ -547,7 +526,7 @@ class ReverseProxyServer:
             print(f"   Error details: {e}")
             exit(1)
         
-        print(f"Reverse Proxy Server starting on {host}:{port}")
+        print(f"Homie Proxy Server starting on {host}:{port}")
         print(f"Available instances: {list(self.instances.keys())}")
         print("Multi-threaded server - supports concurrent requests")
         print("Server ready! Press Ctrl+C to stop")
@@ -563,12 +542,12 @@ class ReverseProxyServer:
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='Modern Python Reverse Proxy Server')
+    parser = argparse.ArgumentParser(description='Homie Proxy Server')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to (default: 0.0.0.0)')
     parser.add_argument('--port', type=int, default=8080, help='Port to bind to (default: 8080)')
     parser.add_argument('--config', default='proxy_config.json', help='Configuration file (default: proxy_config.json)')
     
     args = parser.parse_args()
     
-    server = ReverseProxyServer(args.config)
+    server = HomieProxyServer(args.config)
     server.run(args.host, args.port) 

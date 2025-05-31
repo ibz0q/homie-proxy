@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 
 import requests
+import argparse
+import os
+
+# Parse command line arguments or use environment variable
+parser = argparse.ArgumentParser(description='Test reverse proxy basic functionality')
+parser.add_argument('--port', type=int, 
+                   default=int(os.environ.get('PROXY_PORT', 8080)),
+                   help='Proxy server port (default: 8080, or PROXY_PORT env var)')
+args = parser.parse_args()
 
 print("=" * 60)
 print("SIMPLE BASIC TEST - REVERSE PROXY")
 print("=" * 60)
 
-base_url = "http://localhost:8085/default?token=your-secret-token-here"
+base_url = f"http://localhost:{args.port}/default?token=your-secret-token-here"
 
-print("\nTesting basic functionality...")
+print(f"\nTesting proxy at localhost:{args.port}")
 print("-" * 50)
 
 # Test 1: Simple GET request

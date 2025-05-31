@@ -8,9 +8,6 @@ homeassistant:
   time_zone: UTC
   country: US
 
-# Enable the hello-world custom integration
-hello_world:
-
 # Enable frontend
 frontend:
 
@@ -56,5 +53,5 @@ http:
 logger:
   default: info
   logs:
-    custom_components.hello_world: debug
-    homeassistant.components.hello_world: debug 
+    custom_components.homie_proxy: debug
+    homeassistant.components.homie_proxy: debug 

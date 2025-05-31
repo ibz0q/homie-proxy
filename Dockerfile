@@ -4,12 +4,12 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Copy requirements and install dependencies
-COPY requirements.txt .
+COPY homie-proxy-src/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
-COPY homie_proxy.py .
-COPY proxy_config.json .
+COPY homie-proxy-src/homie_proxy.py .
+COPY homie-proxy-src/proxy_config.json .
 
 # Expose the port
 EXPOSE 8080

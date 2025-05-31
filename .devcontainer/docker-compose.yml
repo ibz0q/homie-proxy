@@ -21,13 +21,13 @@ services:
         mkdir -p /config/custom_components
         mkdir -p /config/deps
         
-        # Copy our hello-world integration
-        if [ -d '/workspaces/python-reverse-proxy/custom_components/hello_world' ]; then
-          echo '📦 Copying hello_world integration...'
-          cp -r /workspaces/python-reverse-proxy/custom_components/hello_world /config/custom_components/
-          ls -la /config/custom_components/hello_world/
+        # Copy our homie-proxy integration
+        if [ -d '/workspaces/python-reverse-proxy/custom_components/homie_proxy' ]; then
+          echo '📦 Copying homie_proxy integration...'
+          cp -r /workspaces/python-reverse-proxy/custom_components/homie_proxy /config/custom_components/
+          ls -la /config/custom_components/homie_proxy/
         else
-          echo '⚠️  hello_world integration not found'
+          echo '⚠️  homie_proxy integration not found'
         fi
         
         # Copy Home Assistant configuration files
@@ -60,7 +60,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ../proxy_config.json:/app/proxy_config.json:ro
+      - ../homie-proxy-src/proxy_config.json:/app/proxy_config.json:ro
     restart: unless-stopped
     networks:
       - ha-network

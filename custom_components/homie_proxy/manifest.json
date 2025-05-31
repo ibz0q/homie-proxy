@@ -1,0 +1,12 @@
+{
+  "domain": "homie_proxy",
+  "name": "Homie Proxy",
+  "codeowners": ["@developer"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/yourusername/homie-proxy",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "requirements": ["aiohttp>=3.8.0", "ipaddress"],
+  "version": "1.0.0"
+} 

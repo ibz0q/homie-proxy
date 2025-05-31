@@ -18,6 +18,7 @@ import threading
 import os
 import pickle
 import warnings
+import subprocess
 
 try:
     import requests
@@ -42,35 +43,48 @@ except ImportError:
 class CustomHTTPSAdapter(HTTPAdapter):
     """Custom HTTPS adapter that allows selective TLS error ignoring"""
     
-    def __init__(self, ignore_tls_errors=None, *args, **kwargs):
-        self.ignore_tls_errors = ignore_tls_errors or []
+    def __init__(self, skip_tls_checks=None, *args, **kwargs):
+        self.skip_tls_checks = skip_tls_checks or []
         super().__init__(*args, **kwargs)
     
     def init_poolmanager(self, *args, **kwargs):
         # Configure SSL context based on ignored errors
         ssl_context = ssl.create_default_context()
         
-        if 'expired_cert' in self.ignore_tls_errors:
+        # Check for ALL option - disables all TLS verification
+        if 'all' in [error.lower() for error in self.skip_tls_checks]:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
-        elif 'self_signed' in self.ignore_tls_errors:
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-        elif 'hostname_mismatch' in self.ignore_tls_errors:
-            ssl_context.check_hostname = False
-        elif 'cert_authority' in self.ignore_tls_errors:
-            ssl_context.verify_mode = ssl.CERT_NONE
-        elif 'weak_cipher' in self.ignore_tls_errors:
-            ssl_context.set_ciphers('ALL:@SECLEVEL=0')
-        
-        # If any TLS errors should be ignored, disable verification
-        if self.ignore_tls_errors:
             kwargs['ssl_context'] = ssl_context
-            # Suppress specific urllib3 warnings
-            if 'expired_cert' in self.ignore_tls_errors or 'self_signed' in self.ignore_tls_errors:
-                urllib3.disable_warnings(InsecureRequestWarning)
-            if 'hostname_mismatch' in self.ignore_tls_errors and SubjectAltNameWarning is not None:
+            # Suppress all urllib3 warnings for ALL option
+            urllib3.disable_warnings(InsecureRequestWarning)
+            if SubjectAltNameWarning is not None:
                 urllib3.disable_warnings(SubjectAltNameWarning)
+            if InsecurePlatformWarning is not None:
+                urllib3.disable_warnings(InsecurePlatformWarning)
+        else:
+            # Handle specific TLS error types
+            if 'expired_cert' in self.skip_tls_checks:
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            elif 'self_signed' in self.skip_tls_checks:
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            elif 'hostname_mismatch' in self.skip_tls_checks:
+                ssl_context.check_hostname = False
+            elif 'cert_authority' in self.skip_tls_checks:
+                ssl_context.verify_mode = ssl.CERT_NONE
+            elif 'weak_cipher' in self.skip_tls_checks:
+                ssl_context.set_ciphers('ALL:@SECLEVEL=0')
+            
+            # If any TLS errors should be ignored, apply the configuration
+            if self.skip_tls_checks:
+                kwargs['ssl_context'] = ssl_context
+                # Suppress specific urllib3 warnings
+                if 'expired_cert' in self.skip_tls_checks or 'self_signed' in self.skip_tls_checks:
+                    urllib3.disable_warnings(InsecureRequestWarning)
+                if 'hostname_mismatch' in self.skip_tls_checks and SubjectAltNameWarning is not None:
+                    urllib3.disable_warnings(SubjectAltNameWarning)
         
         return super().init_poolmanager(*args, **kwargs)
 
@@ -380,6 +394,20 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"[{timestamp}] {format % args}")
     
+    def handle_one_request(self):
+        """Handle a single HTTP request with better error handling"""
+        try:
+            super().handle_one_request()
+        except ConnectionResetError:
+            # Client disconnected - this is normal, don't log as error
+            pass
+        except BrokenPipeError:
+            # Client disconnected while we were sending data - this is normal
+            pass
+        except Exception as e:
+            # Log unexpected errors but don't crash
+            self.log_message(f"Request handling error: {e}")
+    
     def do_GET(self):
         self.handle_request('GET')
     
@@ -519,23 +547,25 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             session.headers.pop('User-Agent', None)
             
             # Configure TLS error handling
-            ignore_tls_errors_param = query_params.get('ignore_tls_errors', [''])
-            if ignore_tls_errors_param[0]:
+            skip_tls_checks_param = query_params.get('skip_tls_checks', [''])
+            if skip_tls_checks_param[0]:
                 # Parse comma-separated list of TLS errors to ignore
-                ignore_tls_errors = [error.strip().lower() for error in ignore_tls_errors_param[0].split(',')]
+                skip_tls_checks = [error.strip().lower() for error in skip_tls_checks_param[0].split(',')]
                 
-                # Mount custom HTTPS adapter
-                https_adapter = CustomHTTPSAdapter(ignore_tls_errors=ignore_tls_errors)
-                session.mount('https://', https_adapter)
-                
-                self.log_message(f"Ignoring TLS errors: {', '.join(ignore_tls_errors)}")
-            
-            # Legacy support for skip_tls_checks (maps to ignoring all errors)
-            skip_tls = query_params.get('skip_tls_checks', ['false'])[0].lower() == 'true'
-            if skip_tls:
-                session.verify = False
-                urllib3.disable_warnings(InsecureRequestWarning)
-                self.log_message("Legacy skip_tls_checks enabled - ignoring all TLS errors")
+                # Check for ALL option - completely disable TLS verification
+                if 'all' in skip_tls_checks:
+                    session.verify = False
+                    urllib3.disable_warnings(InsecureRequestWarning)
+                    if SubjectAltNameWarning is not None:
+                        urllib3.disable_warnings(SubjectAltNameWarning)
+                    if InsecurePlatformWarning is not None:
+                        urllib3.disable_warnings(InsecurePlatformWarning)
+                    self.log_message("Ignoring ALL TLS errors - complete TLS verification disabled")
+                else:
+                    # Mount custom HTTPS adapter for specific error types
+                    https_adapter = CustomHTTPSAdapter(skip_tls_checks=skip_tls_checks)
+                    session.mount('https://', https_adapter)
+                    self.log_message(f"Ignoring specific TLS errors: {', '.join(skip_tls_checks)}")
             
             # Configure DNS servers (basic implementation)
             dns_servers = query_params.get('dns_server[]', [])
@@ -558,8 +588,19 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                     header_name = key[16:-1]  # Remove 'request_headers[' and ']'
                     headers[header_name] = values[0]
             
+            # Fix Host header to match target URL hostname
+            from urllib.parse import urlparse
+            parsed_target = urlparse(target_url)
+            if parsed_target.hostname:
+                # Set Host header to target hostname (with port if non-standard)
+                if ((parsed_target.scheme == 'https' and parsed_target.port not in [None, 443]) or
+                    (parsed_target.scheme == 'http' and parsed_target.port not in [None, 80])):
+                    headers['Host'] = f"{parsed_target.hostname}:{parsed_target.port}"
+                else:
+                    headers['Host'] = parsed_target.hostname
+                self.log_message(f"📤 Fixed Host header to: {headers['Host']}")
+            
             # Always ensure User-Agent is explicitly set (use blank if none provided)
-            # This prevents urllib3 from adding its own default
             user_agent_set = False
             for header_name in headers.keys():
                 if header_name.lower() == 'user-agent':
@@ -599,6 +640,28 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             if body is not None:
                 request_kwargs['data'] = body
             
+            # Log the request headers being sent to target URL
+            self.log_message(f"📤 Request to {target_url}")
+            self.log_message(f"📤 Method: {method}")
+            if headers:
+                self.log_message("📤 Request headers sent to target:")
+                for header_name, header_value in headers.items():
+                    # Truncate very long header values for readability
+                    if len(str(header_value)) > 100:
+                        display_value = str(header_value)[:97] + "..."
+                    else:
+                        display_value = header_value
+                    self.log_message(f"📤   {header_name}: {display_value}")
+            else:
+                self.log_message("📤 No custom headers sent to target")
+            
+            if body:
+                body_size = len(body)
+                if body_size > 1024:
+                    self.log_message(f"📤 Request body: {body_size} bytes")
+                else:
+                    self.log_message(f"📤 Request body: {body_size} bytes - {body[:100]}{'...' if len(body) > 100 else ''}")
+            
             response = session.request(**request_kwargs)
             
             # Send response
@@ -621,18 +684,23 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
             content_length = response.headers.get('Content-Length')
             content_type = response.headers.get('Content-Type', '').lower()
             
-            # Define cache size limit (default 10MB) and non-cacheable content types
+            # Define cache size limit (default 10MB) and streaming content types
             max_cache_size = 10 * 1024 * 1024  # 10MB
-            streaming_content_types = [
-                'video/', 'audio/', 'application/octet-stream',
-                'application/zip', 'application/x-tar', 'application/gzip',
-                'image/gif', 'image/png', 'image/jpeg'  # Large images
+            always_streaming_content_types = [
+                'video/', 'audio/',  # Always stream video and audio
+                'application/zip', 'application/x-tar', 'application/gzip',  # Archives
+            ]
+            large_file_content_types = [
+                'application/octet-stream',  # Stream only if large
+                'image/gif', 'image/png', 'image/jpeg'  # Stream large images only
             ]
             
             should_cache = use_disk_cache and response.status_code == 200
             is_large_content = False
-            is_streaming_content = any(content_type.startswith(ct) for ct in streaming_content_types)
+            is_always_streaming = any(content_type.startswith(ct) for ct in always_streaming_content_types)
+            is_large_file_type = any(content_type.startswith(ct) for ct in large_file_content_types)
             
+            # Check content size
             if content_length:
                 try:
                     size = int(content_length)
@@ -643,12 +711,17 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
                 except:
                     pass
             
-            if is_streaming_content:
+            # Always stream video/audio regardless of size
+            if is_always_streaming:
                 should_cache = False
                 self.log_message(f"Streaming content type ({content_type}), streaming without caching")
+            # Stream large file types only if they're actually large or unknown size
+            elif is_large_file_type and (is_large_content or not content_length):
+                should_cache = False
+                self.log_message(f"Large file type ({content_type}), streaming without caching")
             
             # Stream response data
-            if should_cache and not is_large_content and not is_streaming_content:
+            if should_cache and not is_large_content and not is_always_streaming:
                 # Cache small responses
                 response_data = b''
                 for chunk in response.iter_content(chunk_size=8192):
@@ -797,42 +870,85 @@ class ReverseProxyServer:
     
     def run(self, host: str = '0.0.0.0', port: int = 8080):
         """Run the proxy server"""
-        # Check if port is already in use
+        # Check if port is already in use with multiple methods
         import socket
+        import subprocess
+        
+        # Method 1: Try to connect to the port (most reliable)
         try:
             test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            test_socket.settimeout(1)
+            result = test_socket.connect_ex((host if host != '0.0.0.0' else 'localhost', port))
+            test_socket.close()
+            
+            if result == 0:
+                print(f"❌ ERROR: Port {port} is already in use!")
+                print(f"   Another service is already running on {host}:{port}")
+                print(f"   Please stop the other service or use a different port with --port")
+                
+                # Try to show what's using the port
+                try:
+                    if os.name == 'nt':  # Windows
+                        result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
+                        for line in result.stdout.split('\n'):
+                            if f':{port}' in line and 'LISTENING' in line:
+                                print(f"   Process using port: {line.strip()}")
+                                break
+                    else:  # Unix/Linux
+                        result = subprocess.run(['lsof', '-i', f':{port}'], capture_output=True, text=True)
+                        if result.stdout:
+                            print(f"   Process using port: {result.stdout}")
+                except:
+                    pass
+                
+                exit(1)
+        except Exception:
+            pass  # If connection test fails, port is likely free
+        
+        # Method 2: Try to bind without SO_REUSEADDR (backup check)
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Don't set SO_REUSEADDR for the test - this was the bug!
             test_socket.bind((host, port))
             test_socket.close()
         except OSError as e:
-            if e.errno == 98 or "Address already in use" in str(e):
-                print(f"❌ ERROR: Port {port} is already in use!")
-                print(f"   Another server instance may be running on {host}:{port}")
-                print(f"   Please stop the other instance or use a different port with --port")
-                exit(1)
+            print(f"❌ ERROR: Cannot bind to {host}:{port}")
+            if "Address already in use" in str(e) or e.errno == 98:
+                print(f"   Port {port} is already in use by another process")
+                print(f"   Please stop the other process or use a different port with --port")
             else:
-                print(f"❌ ERROR: Cannot bind to {host}:{port} - {e}")
-                exit(1)
+                print(f"   Error details: {e}")
+            exit(1)
         
+        # Create and start the server
         handler = self.create_handler()
-        server = HTTPServer((host, port), handler)
         
-        print(f"Reverse Proxy Server starting on {host}:{port}")
-        print(f"Available instances: {list(self.instances.keys())}")
+        try:
+            server = HTTPServer((host, port), handler)
+            # Only set SO_REUSEADDR on the actual server, not the test socket
+            server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except OSError as e:
+            print(f"❌ ERROR: Failed to create server on {host}:{port}")
+            print(f"   Error details: {e}")
+            exit(1)
+        
+        print(f"✅ Reverse Proxy Server starting on {host}:{port}")
+        print(f"📋 Available instances: {list(self.instances.keys())}")
         
         # Print cache stats
         cache_stats = self.disk_cache.get_cache_stats()
-        print(f"Disk cache: {cache_stats['total_files']} files, {cache_stats['total_size_mb']}MB ({cache_stats['total_size_bytes']} bytes)")
+        print(f"💾 Disk cache: {cache_stats['total_files']} files, {cache_stats['total_size_mb']}MB ({cache_stats['total_size_bytes']} bytes)")
         if cache_stats['expired_files'] > 0:
-            print(f"Cache cleanup needed: {cache_stats['expired_files']} expired files")
+            print(f"🧹 Cache cleanup needed: {cache_stats['expired_files']} expired files")
         
-        print("Press Ctrl+C to stop")
+        print("🎯 Server ready! Press Ctrl+C to stop")
         
         try:
             server.serve_forever()
         except KeyboardInterrupt:
-            print("\nShutting down server...")
+            print("\n🛑 Shutting down server...")
             server.shutdown()
+            print("✅ Server stopped successfully")
 
 
 if __name__ == '__main__':

@@ -1,0 +1,84 @@
+services:
+  homeassistant:
+    image: homeassistant/home-assistant:latest
+    container_name: ha-dev
+    privileged: true
+    restart: unless-stopped
+    environment:
+      - TZ=UTC
+    volumes:
+      - ../:/workspaces/python-reverse-proxy
+      - ha-config:/config
+    ports:
+      - "8123:8123"
+    networks:
+      - ha-network
+    command: >
+      bash -c "
+        echo '🏠 Starting Home Assistant development environment...'
+        
+        # Create required directories
+        mkdir -p /config/custom_components
+        mkdir -p /config/deps
+        
+        # Copy our hello-world integration
+        if [ -d '/workspaces/python-reverse-proxy/custom_components/hello_world' ]; then
+          echo '📦 Copying hello_world integration...'
+          cp -r /workspaces/python-reverse-proxy/custom_components/hello_world /config/custom_components/
+          ls -la /config/custom_components/hello_world/
+        else
+          echo '⚠️  hello_world integration not found'
+        fi
+        
+        # Copy Home Assistant configuration files
+        echo '⚙️  Setting up configuration files...'
+        cp /workspaces/python-reverse-proxy/.devcontainer/configuration.yaml /config/configuration.yaml
+        cp /workspaces/python-reverse-proxy/.devcontainer/automations.yaml /config/automations.yaml
+        cp /workspaces/python-reverse-proxy/.devcontainer/scenes.yaml /config/scenes.yaml
+        cp /workspaces/python-reverse-proxy/.devcontainer/scripts.yaml /config/scripts.yaml
+        
+        # Verify configuration
+        echo '🔍 Verifying Home Assistant configuration...'
+        python -m homeassistant --script check_config --config /config || echo 'Configuration check failed, but continuing...'
+        
+        # Start Home Assistant
+        echo '🚀 Starting Home Assistant...'
+        exec python -m homeassistant --config /config
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/api/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  homie-proxy:
+    build: 
+      context: ../
+      dockerfile: Dockerfile
+    container_name: homie-proxy-dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../proxy_config.json:/app/proxy_config.json:ro
+    restart: unless-stopped
+    networks:
+      - ha-network
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      homeassistant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/get"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  ha-config:
+
+networks:
+  ha-network:
+    driver: bridge 

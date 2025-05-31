@@ -1,0 +1,11 @@
+include README.md
+include requirements.txt
+include proxy_config.json
+include example_module_usage.py
+include test_module.py
+include docker-compose.yml
+include Dockerfile
+include TESTING.md
+recursive-include tests *.py
+global-exclude __pycache__
+global-exclude *.py[co] 

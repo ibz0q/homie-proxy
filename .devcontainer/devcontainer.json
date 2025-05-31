@@ -1,0 +1,42 @@
+{
+  "name": "Home Assistant + Homie Proxy Dev",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "homeassistant",
+  "workspaceFolder": "/workspaces/python-reverse-proxy",
+  "shutdownAction": "stopCompose",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-vscode.vscode-json",
+        "redhat.vscode-yaml",
+        "ms-vscode.vscode-typescript-next"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": true,
+        "python.formatting.provider": "black",
+        "editor.formatOnSave": true,
+        "files.associations": {
+          "*.yaml": "yaml",
+          "*.yml": "yaml"
+        }
+      }
+    }
+  },
+  "forwardPorts": [8123, 8080],
+  "portsAttributes": {
+    "8123": {
+      "label": "Home Assistant",
+      "onAutoForward": "notify"
+    },
+    "8080": {
+      "label": "Homie Proxy",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "remoteUser": "root"
+} 

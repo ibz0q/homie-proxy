@@ -1,0 +1,60 @@
+# Home Assistant configuration for development
+homeassistant:
+  name: HA Dev Environment
+  latitude: 40.7128
+  longitude: -74.0060
+  elevation: 10
+  unit_system: metric
+  time_zone: UTC
+  country: US
+
+# Enable the hello-world custom integration
+hello_world:
+
+# Enable frontend
+frontend:
+
+# Enable config flow for integrations
+config:
+
+# Enable history
+history:
+
+# Enable logbook
+logbook:
+
+# Enable system health
+system_health:
+
+# Enable person tracking
+person:
+
+# Enable mobile app support
+mobile_app:
+
+# Enable automation
+automation: !include automations.yaml
+
+# Enable scene
+scene: !include scenes.yaml
+
+# Enable script
+script: !include scripts.yaml
+
+# API configuration
+api:
+
+# HTTP configuration for development
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 172.16.0.0/12  # Docker networks
+    - 192.168.0.0/16
+    - 10.0.0.0/8
+
+# Enable logger for debugging
+logger:
+  default: info
+  logs:
+    custom_components.hello_world: debug
+    homeassistant.components.hello_world: debug 

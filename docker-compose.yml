@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   homie-proxy:
     build: .
@@ -8,6 +6,7 @@ services:
     volumes:
       - ./proxy_config.json:/app/proxy_config.json:ro
     restart: unless-stopped
+    stop_grace_period: 0s
     environment:
       - PYTHONUNBUFFERED=1
     healthcheck:

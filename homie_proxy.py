@@ -2,6 +2,34 @@
 """
 Homie Proxy Server
 Minimal dependencies, configurable instances with authentication and restrictions.
+
+This module can be used both as a standalone script and as an importable module.
+
+Example usage as a module:
+    from homie_proxy import HomieProxyServer, ProxyInstance
+    
+    # Create and configure server
+    server = HomieProxyServer('my_config.json')
+    
+    # Run server
+    server.run(host='localhost', port=8080)
+
+Example programmatic configuration:
+    from homie_proxy import HomieProxyServer, create_proxy_config
+    
+    # Create configuration programmatically
+    config = create_proxy_config({
+        'default': {
+            'restrict_out': 'both',
+            'tokens': ['my-token'],
+            'restrict_in_cidrs': []
+        }
+    })
+    
+    # Create server with config
+    server = HomieProxyServer()
+    server.instances = config
+    server.run()
 """
 
 import json
@@ -10,7 +38,7 @@ import ssl
 import urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict
+from typing import Dict, List, Optional
 import socket
 import os
 import subprocess
@@ -31,6 +59,72 @@ except ImportError:
     print("Error: 'requests' library is required. Install with: pip install requests")
     exit(1)
 
+# Module exports for when used as an import
+__all__ = [
+    'HomieProxyServer',
+    'ProxyInstance', 
+    'CustomHTTPSAdapter',
+    'HomieProxyHandler',
+    'create_proxy_config',
+    'create_default_config'
+]
+
+def create_proxy_config(instances_dict: Dict) -> Dict[str, 'ProxyInstance']:
+    """
+    Create proxy instances from a configuration dictionary.
+    
+    Args:
+        instances_dict: Dictionary mapping instance names to configuration dicts
+        
+    Returns:
+        Dictionary mapping instance names to ProxyInstance objects
+        
+    Example:
+        config = create_proxy_config({
+            'api': {
+                'restrict_out': 'external',
+                'tokens': ['api-key-123'],
+                'restrict_in_cidrs': ['192.168.1.0/24']
+            },
+            'internal': {
+                'restrict_out': 'internal',
+                'tokens': [],
+                'restrict_in_cidrs': []
+            }
+        })
+    """
+    instances = {}
+    for name, config in instances_dict.items():
+        instances[name] = ProxyInstance(name, config)
+    return instances
+
+def create_default_config() -> Dict:
+    """
+    Create a default configuration dictionary.
+    
+    Returns:
+        Default configuration dictionary
+    """
+    return {
+        "instances": {
+            "default": {
+                "restrict_out": "both",
+                "tokens": ["your-secret-token-here"],
+                "restrict_in_cidrs": []
+            },
+            "internal-only": {
+                "restrict_out": "internal",
+                "tokens": [],
+                "restrict_in_cidrs": []
+            },
+            "custom-networks": {
+                "restrict_out": "both",
+                "restrict_out_cidrs": ["8.8.8.0/24", "1.1.1.0/24"],
+                "tokens": ["custom-token"],
+                "restrict_in_cidrs": []
+            }
+        }
+    }
 
 class CustomHTTPSAdapter(HTTPAdapter):
     """Custom HTTPS adapter that allows selective TLS error ignoring"""
@@ -510,12 +604,111 @@ class HomieProxyHandler(BaseHTTPRequestHandler):
 
 
 class HomieProxyServer:
-    """Main homie proxy server"""
+    """
+    Main homie proxy server.
     
-    def __init__(self, config_file: str = 'proxy_config.json'):
+    Can be used with file-based configuration or programmatic configuration.
+    
+    Example file-based usage:
+        server = HomieProxyServer('my_config.json')
+        server.run()
+    
+    Example programmatic usage:
+        server = HomieProxyServer()
+        server.add_instance('api', {
+            'restrict_out': 'external',
+            'tokens': ['secret-key'],
+            'restrict_in_cidrs': []
+        })
+        server.run(host='localhost', port=8080)
+    """
+    
+    def __init__(self, config_file: Optional[str] = None, instances: Optional[Dict[str, ProxyInstance]] = None):
+        """
+        Initialize the proxy server.
+        
+        Args:
+            config_file: Path to JSON configuration file (optional)
+            instances: Dictionary of ProxyInstance objects (optional)
+            
+        If neither config_file nor instances is provided, creates default configuration.
+        If both are provided, instances takes precedence.
+        """
         self.config_file = config_file
         self.instances: Dict[str, ProxyInstance] = {}
-        self.load_config()
+        
+        if instances:
+            self.instances = instances
+            print(f"Loaded {len(self.instances)} proxy instances from provided configuration")
+        elif config_file:
+            self.load_config()
+        else:
+            # Neither provided, create default instances
+            self.instances = create_proxy_config(create_default_config()['instances'])
+            print(f"Created {len(self.instances)} default proxy instances")
+    
+    def add_instance(self, name: str, config: Dict) -> None:
+        """
+        Add a proxy instance programmatically.
+        
+        Args:
+            name: Instance name
+            config: Instance configuration dictionary
+            
+        Example:
+            server.add_instance('api', {
+                'restrict_out': 'external',
+                'tokens': ['api-key-123'],
+                'restrict_in_cidrs': ['192.168.1.0/24']
+            })
+        """
+        self.instances[name] = ProxyInstance(name, config)
+        print(f"Added proxy instance: {name}")
+    
+    def remove_instance(self, name: str) -> bool:
+        """
+        Remove a proxy instance.
+        
+        Args:
+            name: Instance name to remove
+            
+        Returns:
+            True if instance was removed, False if it didn't exist
+        """
+        if name in self.instances:
+            del self.instances[name]
+            print(f"Removed proxy instance: {name}")
+            return True
+        return False
+    
+    def list_instances(self) -> List[str]:
+        """
+        Get list of configured instance names.
+        
+        Returns:
+            List of instance names
+        """
+        return list(self.instances.keys())
+    
+    def get_instance_config(self, name: str) -> Optional[Dict]:
+        """
+        Get configuration for a specific instance.
+        
+        Args:
+            name: Instance name
+            
+        Returns:
+            Instance configuration dictionary or None if not found
+        """
+        if name in self.instances:
+            instance = self.instances[name]
+            return {
+                'restrict_out': instance.restrict_out,
+                'restrict_out_cidrs': [str(cidr) for cidr in instance.restrict_out_cidrs],
+                'restrict_in_cidrs': [str(cidr) for cidr in instance.restrict_in_cidrs],
+                'tokens': list(instance.tokens)
+            }
+        return None
     
     def load_config(self):
         """Load configuration from file"""
@@ -642,7 +835,8 @@ class HomieProxyServer:
             print("Server stopped successfully")
 
 
-if __name__ == '__main__':
+def main():
+    """Main entry point for console script"""
     import argparse
     
     parser = argparse.ArgumentParser(description='Homie Proxy Server')
@@ -653,4 +847,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     server = HomieProxyServer(args.config)
-    server.run(args.host, args.port) 
+    server.run(args.host, args.port)
+
+
+if __name__ == '__main__':
+    main() 

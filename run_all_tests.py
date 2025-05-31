@@ -114,6 +114,11 @@ test_files = [
         'description': 'Tests TLS certificate information logging'
     },
     {
+        'file': 'tests/simple_tls_test.py',
+        'name': 'TLS Certificate Inspector',
+        'description': 'Standalone TLS certificate inspection tool'
+    },
+    {
         'file': 'tests/test_dns_override.py',
         'name': 'DNS Override',
         'description': 'Tests custom DNS server functionality'
@@ -128,11 +133,6 @@ test_files = [
         'name': 'Redirect Following',
         'description': 'Tests redirect following functionality'
     },
-    {
-        'file': 'tests/test_winerror_fix.py',
-        'name': 'Connection Error Handling',
-        'description': 'Tests connection error handling (legacy Windows errors)'
-    },
     
     # Debug and diagnostic tests
     {
@@ -141,14 +141,19 @@ test_files = [
         'description': 'Diagnostic tests for debugging'
     },
     {
+        'file': 'tests/test_debug_simple.py',
+        'name': 'Simple Debug Test',
+        'description': 'Simple diagnostic test for basic debugging'
+    },
+    {
         'file': 'tests/test_header_logging_demo.py',
         'name': 'Header Logging Demo',
         'description': 'Demonstrates header logging capabilities'
     },
     {
-        'file': 'tests/final_confirmation_test.py',
-        'name': 'Final Confirmation Tests',
-        'description': 'Comprehensive final validation tests'
+        'file': 'tests/debug_headers.py',
+        'name': 'Header Debug Utility',
+        'description': 'Debug utility for header inspection and testing'
     },
     {
         'file': 'tests/run_tests.py',

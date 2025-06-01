@@ -10,13 +10,43 @@ parser = argparse.ArgumentParser(description='Test OPTIONS request with CORS hea
 parser.add_argument('--port', type=int, 
                    default=int(os.environ.get('PROXY_PORT', 8080)),
                    help='Proxy server port (default: 8080, or PROXY_PORT env var)')
+parser.add_argument('--mode', choices=['standalone', 'ha'], default='standalone',
+                   help='Test mode: standalone proxy or Home Assistant integration (default: standalone)')
+parser.add_argument('--instance', default='external-api-route',
+                   help='HA integration instance name (default: external-api-route)')
 args = parser.parse_args()
 
 print("=" * 60)
-print("OPTIONS REQUEST WITH CORS HEADERS TEST")
+print(f"OPTIONS REQUEST WITH CORS HEADERS TEST ({args.mode.upper()})")
 print("=" * 60)
 
-base_url = f"http://localhost:{args.port}/default?token=your-secret-token-here"
+# Construct base URL based on mode
+if args.mode == 'ha':
+    # Get the authentication token from debug endpoint
+    print("Getting authentication token from debug endpoint...")
+    try:
+        debug_response = requests.get(f"http://localhost:{args.port}/api/homie_proxy/debug", timeout=5)
+        if debug_response.status_code == 200:
+            debug_data = debug_response.json()
+            instance_data = debug_data.get('instances', {}).get(args.instance, {})
+            tokens = instance_data.get('tokens', [])
+            if tokens:
+                token = tokens[0]
+                base_url = f"http://localhost:{args.port}/api/homie_proxy/{args.instance}"
+                token_param = f"token={token}&"
+                print(f"✅ Found authentication token: {token[:12]}...")
+            else:
+                print("❌ No tokens found in debug response")
+                exit(1)
+        else:
+            print(f"❌ Debug endpoint returned status {debug_response.status_code}")
+            exit(1)
+    except Exception as e:
+        print(f"❌ Failed to get token: {e}")
+        exit(1)
+else:
+    base_url = f"http://localhost:{args.port}/default"
+    token_param = "token=your-secret-token-here&"
 
 print(f"\nTesting proxy at localhost:{args.port}")
 print("-" * 50)
@@ -25,7 +55,7 @@ print("\n🔸 Test 1: OPTIONS with single CORS header")
 print("-" * 40)
 
 # Test 1: Basic OPTIONS request with CORS header
-cors_url = f"{base_url}&url=https://httpbin.org/anything&response_header[Access-Control-Allow-Origin]=*"
+cors_url = f"{base_url}?{token_param}url=https://httpbin.org/anything&response_header[Access-Control-Allow-Origin]=*"
 
 try:
     print("📥 Making OPTIONS request with CORS header...")
@@ -56,7 +86,7 @@ print("\n🔸 Test 2: OPTIONS with multiple CORS headers")
 print("-" * 40)
 
 # Test 2: OPTIONS with multiple CORS headers
-multi_cors_url = (f"{base_url}&url=https://httpbin.org/anything"
+multi_cors_url = (f"{base_url}?{token_param}url=https://httpbin.org/anything"
                   f"&response_header[Access-Control-Allow-Origin]=*"
                   f"&response_header[Access-Control-Allow-Methods]=GET,POST,PUT,DELETE,OPTIONS"
                   f"&response_header[Access-Control-Allow-Headers]=Content-Type,Authorization,X-Custom-Header"
@@ -95,7 +125,7 @@ except Exception as e:
 print("\n🔸 Test 3: Compare OPTIONS vs GET with same CORS header")
 print("-" * 40)
 
-cors_test_url = f"{base_url}&url=https://httpbin.org/anything&response_header[Access-Control-Allow-Origin]=*"
+cors_test_url = f"{base_url}?{token_param}url=https://httpbin.org/anything&response_header[Access-Control-Allow-Origin]=*"
 
 try:
     print("📥 Making GET request...")

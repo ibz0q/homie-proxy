@@ -705,30 +705,30 @@ class HomieProxyView(HomeAssistantView):
         self.name = f"api:homie_proxy:{proxy_instance.name}"
         self.requires_auth = False  # We handle auth with tokens
 
-    async def get(self, request: Request, **kwargs) -> web.Response:
-        """Handle GET requests."""
+    async def get(self, request: Request) -> web.Response:
+        """Handle GET request (including WebSocket upgrades)."""
         return await self.handler.handle_request(request, "GET")
-    
-    async def post(self, request: Request, **kwargs) -> web.Response:
-        """Handle POST requests."""
+
+    async def post(self, request: Request) -> web.Response:
+        """Handle POST request."""
         return await self.handler.handle_request(request, "POST")
-    
-    async def put(self, request: Request, **kwargs) -> web.Response:
-        """Handle PUT requests."""
+
+    async def put(self, request: Request) -> web.Response:
+        """Handle PUT request."""
         return await self.handler.handle_request(request, "PUT")
-    
-    async def patch(self, request: Request, **kwargs) -> web.Response:
-        """Handle PATCH requests."""
+
+    async def patch(self, request: Request) -> web.Response:
+        """Handle PATCH request."""
         return await self.handler.handle_request(request, "PATCH")
-    
-    async def delete(self, request: Request, **kwargs) -> web.Response:
-        """Handle DELETE requests."""
+
+    async def delete(self, request: Request) -> web.Response:
+        """Handle DELETE request."""
         return await self.handler.handle_request(request, "DELETE")
-    
-    async def head(self, request: Request, **kwargs) -> web.Response:
-        """Handle HEAD requests."""
-        return await self.handler.handle_request(request, "HEAD")
-    
+
+    async def head(self, request: Request) -> web.Response:
+        """Handle HEAD request."""
+        return await self.handler.handle_request(request, "HEAD")  
+  
     async def options(self, request: Request, **kwargs) -> web.Response:
         """Handle OPTIONS requests."""
         return await self.handler.handle_request(request, "OPTIONS")

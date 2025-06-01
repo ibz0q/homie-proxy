@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  test-runner:
+    image: python:3.11-slim
+    container_name: homie-proxy-tests
+    network_mode: host
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    environment:
+      - PROXY_HOST=localhost
+      - PROXY_PORT=8123
+      - PROXY_NAME=external-only-route
+      - PROXY_TOKEN=0061b276-ebab-4892-8c7b-13812084f5e9
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+    command: >
+      bash -c "
+        echo 'Installing dependencies...' &&
+        pip install requests &&
+        echo 'Starting test suite...' &&
+        python tests/run_all_tests.py --force --concurrent
+      "
+    depends_on:
+      - ha-dev
+    
+  # Reference to existing HA container
+  ha-dev:
+    external: true 

@@ -1,13 +1,14 @@
 #!/bin/bash
 
 # HomieProxy Test Script - Works with both standalone and HA integration
-# Usage: ./test_ha_integration.sh [--mode standalone|ha] [--port PORT] [--instance INSTANCE]
+# Usage: ./test_ha_integration.sh [--mode standalone|ha] [--port PORT] [--instance INSTANCE] [--token TOKEN] [--host HOST]
 
 # Default values
 MODE="standalone"
 PORT="8080"
 INSTANCE="external-api-route"
 HOST="localhost"
+TOKEN=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -28,12 +29,39 @@ while [[ $# -gt 0 ]]; do
             HOST="$2"
             shift 2
             ;;
+        --token)
+            TOKEN="$2"
+            shift 2
+            ;;
+        --help)
+            echo "Usage: $0 [--mode standalone|ha] [--port PORT] [--instance INSTANCE] [--token TOKEN] [--host HOST]"
+            echo ""
+            echo "Options:"
+            echo "  --mode        Target mode: standalone or ha (default: standalone)"
+            echo "  --port        Port number (default: 8080 for standalone, 8123 for HA)"
+            echo "  --instance    HA instance name (default: external-api-route)"
+            echo "  --token       Authentication token (auto-detected if not provided for HA mode)"
+            echo "  --host        Host address (default: localhost)"
+            echo "  --help        Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0 --mode ha --port 8123 --instance external-only-route --token 0061b276-ebab-4892-8c7b-13812084f5e9"
+            echo "  $0 --mode ha --instance internal-only-route --token 7f2b2084-a7c6-46a4-adda-eec6c0cfe809"
+            echo "  $0 --mode standalone --port 8080"
+            exit 0
+            ;;
         *)
             echo "Unknown option $1"
+            echo "Use --help for usage information"
             exit 1
             ;;
     esac
 done
+
+# Set default port based on mode if not explicitly set
+if [[ "$MODE" == "ha" && "$PORT" == "8080" ]]; then
+    PORT="8123"
+fi
 
 # Validate mode
 if [[ "$MODE" != "standalone" && "$MODE" != "ha" ]]; then
@@ -54,29 +82,42 @@ echo ""
 if [[ "$MODE" == "ha" ]]; then
     BASE_URL="http://$HOST:$PORT/api/homie_proxy/$INSTANCE"
     
-    # Get the authentication token from debug endpoint
-    echo "Getting authentication token from debug endpoint..."
-    DEBUG_RESPONSE=$(curl -s "http://$HOST:$PORT/api/homie_proxy/debug" 2>/dev/null)
-    
-    if [[ $? -eq 0 ]] && [[ -n "$DEBUG_RESPONSE" ]]; then
-        # Extract token using grep and sed (works with minimal dependencies)
-        TOKEN=$(echo "$DEBUG_RESPONSE" | grep -o '"[a-f0-9-]\{36\}"' | head -1 | tr -d '"')
+    # If token not provided, try to get it from debug endpoint
+    if [[ -z "$TOKEN" ]]; then
+        echo "No token provided, getting authentication token from debug endpoint..."
+        DEBUG_RESPONSE=$(curl -s "http://$HOST:$PORT/api/homie_proxy/debug" 2>/dev/null)
         
-        if [[ -n "$TOKEN" ]]; then
-            TOKEN_PARAM="token=$TOKEN&"
-            echo "✅ Found authentication token: ${TOKEN:0:8}..."
+        if [[ $? -eq 0 ]] && [[ -n "$DEBUG_RESPONSE" ]]; then
+            # Extract token for the specific instance using grep and sed
+            TOKEN=$(echo "$DEBUG_RESPONSE" | grep -A 10 "\"$INSTANCE\"" | grep -o '"[a-f0-9-]\{36\}"' | head -1 | tr -d '"')
+            
+            if [[ -n "$TOKEN" ]]; then
+                echo "✅ Found authentication token for instance '$INSTANCE': ${TOKEN:0:8}..."
+            else
+                echo "❌ Could not extract token for instance '$INSTANCE' from debug response"
+                echo "Available instances:"
+                echo "$DEBUG_RESPONSE" | grep -o '"[^"]*": {' | grep -v '"instances"' | grep -v '"system"' | grep -v '"debug"' | sed 's/": {//' | tr -d '"'
+                exit 1
+            fi
         else
-            echo "❌ Could not extract token from debug response"
-            echo "Debug response: $DEBUG_RESPONSE"
+            echo "❌ Could not reach debug endpoint at http://$HOST:$PORT/api/homie_proxy/debug"
+            echo "Make sure Home Assistant is running and HomieProxy integration is loaded"
             exit 1
         fi
     else
-        echo "❌ Could not reach debug endpoint"
-        exit 1
+        echo "Using provided token: ${TOKEN:0:8}..."
     fi
+    
+    TOKEN_PARAM="token=$TOKEN&"
 else
     BASE_URL="http://$HOST:$PORT/default"
-    TOKEN_PARAM="token=your-secret-token-here&"
+    if [[ -z "$TOKEN" ]]; then
+        TOKEN="your-secret-token-here"
+        echo "Using default standalone token: $TOKEN"
+    else
+        echo "Using provided token: $TOKEN"
+    fi
+    TOKEN_PARAM="token=$TOKEN&"
 fi
 
 # Test counter

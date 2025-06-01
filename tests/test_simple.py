@@ -6,13 +6,17 @@ import os
 
 # Parse command line arguments or use environment variable
 parser = argparse.ArgumentParser(description='Test reverse proxy basic functionality')
+parser.add_argument('--host', default=os.environ.get('PROXY_HOST', 'localhost'),
+                   help='Proxy host (default: localhost)')
 parser.add_argument('--port', type=int, 
                    default=int(os.environ.get('PROXY_PORT', 8080)),
                    help='Proxy server port (default: 8080, or PROXY_PORT env var)')
-parser.add_argument('--mode', choices=['standalone', 'ha'], default='standalone',
-                   help='Test mode: standalone proxy or Home Assistant integration (default: standalone)')
-parser.add_argument('--instance', default='external-api-route',
+parser.add_argument('--name', default=os.environ.get('PROXY_NAME', 'external-api-route'),
                    help='HA integration instance name (default: external-api-route)')
+parser.add_argument('--token', default=os.environ.get('PROXY_TOKEN', ''),
+                   help='Authentication token (auto-detected if not provided)')
+parser.add_argument('--mode', choices=['standalone', 'ha'], default='ha',
+                   help='Test mode: standalone proxy or Home Assistant integration (default: ha)')
 args = parser.parse_args()
 
 print("=" * 60)
@@ -21,13 +25,21 @@ print("=" * 60)
 
 # Construct base URL based on mode
 if args.mode == 'ha':
-    base_url = f"http://localhost:{args.port}/api/homie_proxy/{args.instance}"
-    token_param = ""  # HA integration has auth disabled for testing
+    base_url = f"http://{args.host}:{args.port}/api/homie_proxy/{args.name}"
+    # Use provided token or auto-detect from debug endpoint
+    if args.token:
+        token_param = f"token={args.token}&"
+        print(f"Using provided token: {args.token[:8]}...")
+    else:
+        print("No token provided - this test requires a token for HA mode")
+        print("Please provide token via --token argument or PROXY_TOKEN environment variable")
+        exit(1)
 else:
-    base_url = f"http://localhost:{args.port}/default"
-    token_param = "token=your-secret-token-here&"
+    base_url = f"http://{args.host}:{args.port}/default"
+    token_param = f"token={args.token or 'your-secret-token-here'}&"
 
-print(f"\nTesting proxy at localhost:{args.port} ({args.mode} mode)")
+print(f"\nTesting proxy at {args.host}:{args.port} ({args.mode} mode)")
+print(f"Instance: {args.name}")
 print("-" * 50)
 
 # Test 1: Simple GET request

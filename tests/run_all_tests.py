@@ -10,13 +10,62 @@ import time
 import os
 import concurrent.futures
 import threading
+import argparse
 from typing import Dict, List, Tuple
 
-# Configuration - can be overridden by environment variables
-PROXY_HOST = os.getenv("PROXY_HOST", "localhost")
-PROXY_PORT = os.getenv("PROXY_PORT", "8123")
-PROXY_NAME = os.getenv("PROXY_NAME", "external-api-route")
-PROXY_TOKEN = os.getenv("PROXY_TOKEN", "93f00721-b834-460e-96f0-9978eb594e3f")
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="HomieProxy Comprehensive Test Suite",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python run_all_tests.py --host localhost --port 8123 --name external-only-route --token 0061b276-ebab-4892-8c7b-13812084f5e9
+  python run_all_tests.py --host ha.local --port 8123 --concurrent
+  python run_all_tests.py --sequential --name internal-only-route
+        """
+    )
+    
+    parser.add_argument("--host", default=os.getenv("PROXY_HOST", "localhost"),
+                       help="Proxy host (default: localhost)")
+    parser.add_argument("--port", default=os.getenv("PROXY_PORT", "8123"),
+                       help="Proxy port (default: 8123)")
+    parser.add_argument("--name", default=os.getenv("PROXY_NAME", "external-api-route"),
+                       help="Proxy instance name (default: external-api-route)")
+    parser.add_argument("--token", default=os.getenv("PROXY_TOKEN", ""),
+                       help="Authentication token (auto-detected if not provided)")
+    
+    parser.add_argument("--concurrent", action="store_true", default=True,
+                       help="Run tests concurrently (default)")
+    parser.add_argument("--sequential", action="store_true", 
+                       help="Run tests sequentially (slower, more detailed output)")
+    
+    parser.add_argument("--max-workers", type=int, default=3,
+                       help="Maximum concurrent workers (default: 3)")
+    parser.add_argument("--timeout", type=int, default=300,
+                       help="Timeout per test in seconds (default: 300)")
+    
+    parser.add_argument("--list-tests", action="store_true",
+                       help="List all available tests and exit")
+    parser.add_argument("--category", choices=["core", "headers", "security", "network", "methods", "cors", "redirects", "performance", "debug"],
+                       help="Run only tests from specific category")
+    parser.add_argument("--force", action="store_true",
+                       help="Skip confirmation prompt and run tests immediately")
+    
+    args = parser.parse_args()
+    
+    # Handle mode selection
+    if args.sequential:
+        args.concurrent = False
+    
+    return args
+
+# Configuration - can be overridden by command line arguments
+args = parse_arguments()
+PROXY_HOST = args.host
+PROXY_PORT = args.port
+PROXY_NAME = args.name
+PROXY_TOKEN = args.token
 
 def run_test_file(test_file: str, capture_output: bool = True) -> Tuple[str, bool, str, float]:
     """Run a test file and return (test_file, success, output, duration)"""
@@ -133,10 +182,14 @@ def main():
     print(f"  Host: {PROXY_HOST}")
     print(f"  Port: {PROXY_PORT}")
     print(f"  Instance Name: {PROXY_NAME}")
-    print(f"  Token: {PROXY_TOKEN[:8]}...{PROXY_TOKEN[-8:]}")
+    if PROXY_TOKEN:
+        print(f"  Token: {PROXY_TOKEN[:8]}...{PROXY_TOKEN[-8:]}")
+    else:
+        print(f"  Token: (auto-detect from debug endpoint)")
     print("")
-    print("To override configuration, set environment variables:")
-    print("  PROXY_HOST, PROXY_PORT, PROXY_NAME, PROXY_TOKEN")
+    print("To override configuration, use command line arguments:")
+    print("  --host, --port, --name, --token")
+    print("Or set environment variables: PROXY_HOST, PROXY_PORT, PROXY_NAME, PROXY_TOKEN")
     print("")
     print("Test Modes:")
     print("  --concurrent : Run tests concurrently (faster, default)")
@@ -147,61 +200,155 @@ def main():
     print("- Internet connection for testing external services")
     print("")
     
-    # Check for command line arguments
-    concurrent_mode = True
-    if len(sys.argv) > 1:
-        if "--sequential" in sys.argv:
-            concurrent_mode = False
-        elif "--concurrent" in sys.argv:
-            concurrent_mode = True
-    
-    mode_str = "concurrent" if concurrent_mode else "sequential"
-    print(f"Running in {mode_str} mode...")
-    
-    input("Press Enter to start tests (or Ctrl+C to cancel)...")
-    
-    start_time = time.time()
-    
     # Define test files in order of preference (concurrent safe)
-    test_files = [
+    core_tests = [
         "test_http_methods.py",           # Basic HTTP methods
-        "test_follow_redirects.py",       # Redirect following
+        "test_follow_redirects.py",       # Redirect following  
         "test_websocket.py",              # WebSocket functionality
         "test_streaming_performance.py",  # Streaming and performance
-        "test_concurrent_connections.py", # New concurrent connections test
+        "test_concurrent_connections.py", # Concurrent connections test
+        "test_concurrent_requests.py",    # Concurrent requests test
+        "test_proxy.py",                  # Core proxy functionality
     ]
     
-    # Optional additional tests that might exist
-    optional_tests = [
-        "test_access_control.py",
-        "test_tls_fix.py",
-        "test_user_agent.py",
-        "test_response_header.py",
+    # Header and host tests
+    header_tests = [
         "test_host_header.py",
+        "test_override_host.py", 
+        "test_header_logging.py",
+        "test_header_logging_demo.py",
+        "test_user_agent.py",
+        "test_blank_ua.py",
+        "test_response_headers.py",
+    ]
+    
+    # TLS and security tests
+    security_tests = [
+        "test_tls_all.py",
+        "test_tls_fix.py", 
+        "test_tls_cert_info.py",
+        "simple_tls_test.py",
+    ]
+    
+    # Access control and networking tests
+    network_tests = [
+        "test_access_control.py",
+        "test_cloudflare_dns.py",
+        "test_dns_override.py",
+    ]
+    
+    # POST/PUT/PATCH method tests
+    method_tests = [
+        "test_post_methods.py",
+    ]
+    
+    # CORS and options tests  
+    cors_tests = [
+        "test_options_cors.py",
+        "cors_test.py",
+    ]
+    
+    # Redirect tests
+    redirect_tests = [
+        "test_redirect_simple.py",
+    ]
+    
+    # Performance and streaming tests
+    performance_tests = [
+        "test_real_video.py",
+    ]
+    
+    # Simple/debug tests
+    debug_tests = [
+        "test_simple.py",
+        "test_simple_debug.py", 
+        "test_debug_simple.py",
+        "debug_headers.py",
+    ]
+    
+    # Combine all test categories
+    all_test_categories = [
+        ("Core Functionality", "core", core_tests),
+        ("Headers & Host", "headers", header_tests), 
+        ("TLS & Security", "security", security_tests),
+        ("Network & Access Control", "network", network_tests),
+        ("HTTP Methods", "methods", method_tests),
+        ("CORS & Options", "cors", cors_tests),
+        ("Redirects", "redirects", redirect_tests),
+        ("Performance", "performance", performance_tests),
+        ("Debug & Simple", "debug", debug_tests),
     ]
     
     # Find existing test files
     script_dir = os.path.dirname(os.path.abspath(__file__))
     existing_tests = []
     
-    # Add core tests that exist
-    for test_file in test_files:
-        test_path = os.path.join(script_dir, test_file)
-        if os.path.exists(test_path):
-            existing_tests.append(test_file)
-        else:
-            print(f"Core test not found: {test_file}")
+    print("Scanning for available tests...")
     
-    # Add optional tests that exist
-    for test_file in optional_tests:
-        test_path = os.path.join(script_dir, test_file)
-        if os.path.exists(test_path):
-            print(f"Found optional test: {test_file}")
-            existing_tests.append(test_file)
+    # Add tests from all categories that exist
+    for category_name, category_key, test_files in all_test_categories:
+        category_found = []
+        for test_file in test_files:
+            test_path = os.path.join(script_dir, test_file)
+            if os.path.exists(test_path):
+                category_found.append(test_file)
+                # Only add to existing_tests if no category filter or matches filter
+                if not args.category or args.category == category_key:
+                    existing_tests.append(test_file)
+        
+        if category_found:
+            filtered_info = f" (filtered)" if args.category and args.category != category_key else ""
+            print(f"  {category_name}: {len(category_found)} tests found{filtered_info}")
+    
+    # Check for any test files that weren't categorized
+    all_files = [f for f in os.listdir(script_dir) if f.startswith('test_') and f.endswith('.py')]
+    all_files.extend([f for f in os.listdir(script_dir) if f.endswith('_test.py')])
+    all_files.extend(['cors_test.py', 'debug_headers.py', 'simple_tls_test.py'])  # Non-standard naming
+    
+    categorized_files = []
+    for _, _, test_files in all_test_categories:
+        categorized_files.extend(test_files)
+    
+    uncategorized = [f for f in all_files if f not in categorized_files and f != 'run_all_tests.py']
+    if uncategorized:
+        print(f"\nUncategorized test files found: {uncategorized}")
+        for test_file in uncategorized:
+            test_path = os.path.join(script_dir, test_file)
+            if os.path.exists(test_path):
+                if not args.category:  # Only add uncategorized if no category filter
+                    existing_tests.append(test_file)
+                print(f"  Added uncategorized test: {test_file}")
+    
+    # Handle --list-tests option
+    if args.list_tests:
+        print(f"\nAll available tests ({len(existing_tests)} total):")
+        for i, test_file in enumerate(existing_tests, 1):
+            print(f"  {i:2d}. {test_file}")
+        return 0
+    
+    print(f"\nTotal tests found: {len(existing_tests)}")
+    if args.category:
+        print(f"Category filter: {args.category}")
+    print(f"Tests to run: {', '.join(existing_tests[:5])}{'...' if len(existing_tests) > 5 else ''}")
+    
+    if not existing_tests:
+        print("No tests found to run!")
+        return 1
+    
+    mode_str = "concurrent" if args.concurrent else "sequential"
+    print(f"Running in {mode_str} mode...")
+    
+    if not PROXY_TOKEN:
+        print("\n⚠️  No token provided - will attempt auto-detection from debug endpoint")
+    
+    if not args.force:
+        input("Press Enter to start tests (or Ctrl+C to cancel)...")
+    
+    start_time = time.time()
     
     # Run tests
-    if concurrent_mode:
-        results = run_tests_concurrent(existing_tests, max_workers=3)
+    if args.concurrent:
+        results = run_tests_concurrent(existing_tests, max_workers=args.max_workers)
     else:
         results = run_tests_sequential(existing_tests)
     

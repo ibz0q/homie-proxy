@@ -1,191 +1,223 @@
 # HomieProxy
 
-A high-performance HTTP reverse proxy with **Home Assistant integration**, optimized for streaming, authentication, and secure network access control.
+A high-performance HTTP reverse proxy with Home Assistant integration, optimized for streaming, authentication, and secure network access control.
 
-## What It Does
+## Features
 
-HomieProxy acts as a secure reverse proxy that:
-- **Proxies HTTP/HTTPS requests** with token-based authentication
-- **Streams large files efficiently** (videos, downloads) without memory buffering
-- **Controls network access** (internal-only, external-only, or custom CIDR ranges)
-- **Handles WebSocket connections** for real-time applications
-- **Integrates natively with Home Assistant** as a custom component
+- HTTP/HTTPS proxy with token-based authentication
+- Streaming support for large files without memory buffering
+- Network access control (internal-only, external-only, custom CIDR)
+- WebSocket connection handling
+- Native Home Assistant integration
+- All HTTP methods support (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS)
+- TLS bypass options for development/testing
+- Custom request/response header manipulation
+- Redirect following control
 
-Perfect for securely accessing external APIs, streaming media files, or proxying requests through Home Assistant.
+## Installation
 
-## Installation & Usage
+### Home Assistant Integration
 
-### 🏠 Home Assistant Integration (Recommended)
-
+1. Copy integration to custom components:
 ```bash
-# 1. Install as custom component
 cp -r custom_components/homie_proxy /config/custom_components/
-
-# 2. Restart Home Assistant
-
-# 3. Add via UI (Settings > Integrations > Add Integration > HomieProxy)
-# Or add to configuration.yaml:
-homie_proxy:
-  external-api-route:
-    tokens: ["your-generated-token"]
-    restrict_out: "external"  # external, internal, any, or CIDR
-    restrict_in: "192.168.1.0/24"  # Optional: restrict client IPs
-
-# 4. Use the proxy
-curl "http://your-ha:8123/api/homie_proxy/external-api-route?token=TOKEN&url=https://httpbin.org/get"
 ```
 
-**Debug endpoint** to get your tokens: `http://your-ha:8123/api/homie_proxy/debug`
+2. Restart Home Assistant
 
-### ⚡ Standalone Server
+3. Add via UI: Settings > Integrations > Add Integration > HomieProxy
+
+4. Configure instance with desired settings
+
+### Standalone Server
 
 ```bash
-# Install and run
 pip install -e .
 homie-proxy --host localhost --port 8080
-
-# Use the proxy
-curl "http://localhost:8080/default?token=your-secret-token&url=https://httpbin.org/get"
 ```
 
-### 🐳 Docker
+### Docker
 
 ```bash
 docker-compose up
-# Proxy available at localhost:8080
+```
+
+## Usage
+
+### Basic Request
+
+```bash
+curl "http://localhost:8123/api/homie_proxy/INSTANCE_NAME?token=TOKEN&url=TARGET_URL"
+```
+
+### Home Assistant Debug Endpoint
+
+Get configuration and tokens: `http://localhost:8123/api/homie_proxy/debug`
+
+## Parameters
+
+### Required Parameters
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `token` | Authentication token | `token=abc123-def456` |
+| `url` | Target URL to proxy | `url=https://httpbin.org/get` |
+
+### Optional Parameters
+
+| Parameter | Description | Default | Example |
+|-----------|-------------|---------|---------|
+| `timeout` | Request timeout in seconds | Instance default | `timeout=60` |
+| `follow_redirects` | Follow HTTP redirects | `false` | `follow_redirects=true` |
+| `skip_tls_checks` | Skip TLS verification | None | `skip_tls_checks=all` |
+
+### Request Headers
+
+Set custom request headers using `request_header[NAME]` format:
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `request_header[Host]` | Override Host header | `request_header[Host]=custom.example.com` |
+| `request_header[User-Agent]` | Set User-Agent | `request_header[User-Agent]=MyBot/1.0` |
+| `request_header[Authorization]` | Add auth header | `request_header[Authorization]=Bearer token123` |
+| `request_header[X-Custom]` | Any custom header | `request_header[X-Custom]=value` |
+
+### Response Headers
+
+Add custom response headers using `response_header[NAME]` format:
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `response_header[X-Custom]` | Add custom response header | `response_header[X-Custom]=test` |
+| `response_header[Access-Control-Allow-Origin]` | CORS header | `response_header[Access-Control-Allow-Origin]=*` |
+
+### TLS Skip Options
+
+The `skip_tls_checks` parameter accepts:
+
+| Value | Description |
+|-------|-------------|
+| `all` | Skip all TLS verification |
+| `hostname_mismatch` | Skip hostname verification |
+| `expired_cert` | Skip certificate expiration check |
+| `self_signed` | Skip self-signed certificate check |
+| `cert_authority` | Skip certificate authority validation |
+| `weak_cipher` | Allow weak ciphers |
+
+Multiple values can be comma-separated: `skip_tls_checks=expired_cert,self_signed`
+
+## Instance Configuration
+
+Configure each proxy instance with:
+
+| Setting | Description | Values | Default |
+|---------|-------------|--------|---------|
+| **Name** | Unique endpoint identifier | String | `external-api-route` |
+| **Timeout** | Request timeout | 30-3600 seconds | 300 |
+| **Outbound Access** | Destination restrictions | `any`, `external`, `internal`, CIDR | `any` |
+| **Inbound Access** | Client IP restrictions | CIDR range | None |
+| **Requires Auth** | HA authentication required | `true`, `false` | `true` |
+| **Tokens** | Authentication tokens | List of UUIDs | Auto-generated |
+
+### Network Access Control
+
+**Outbound Access (restrict_out):**
+- `any` - Allow all destinations
+- `external` - Only external/public IPs
+- `internal` - Only private network IPs (10.x, 172.16-31.x, 192.168.x)
+- Custom CIDR - Specific IP ranges (e.g., `10.0.0.0/8`)
+
+**Inbound Access (restrict_in):**
+- CIDR notation to restrict client IPs (e.g., `192.168.1.0/24`)
+- Empty = allow from any IP
+
+## Examples
+
+### Basic GET Request
+```bash
+curl "http://localhost:8123/api/homie_proxy/external-api-route?token=abc123&url=https://httpbin.org/get"
+```
+
+### POST with JSON Data
+```bash
+curl -X POST "http://localhost:8123/api/homie_proxy/external-api-route?token=abc123&url=https://httpbin.org/post" \
+     -H "Content-Type: application/json" \
+     -d '{"test": "data"}'
+```
+
+### Custom Headers and Host Override
+```bash
+curl "http://localhost:8123/api/homie_proxy/external-api-route?token=abc123&url=https://httpbin.org/headers&request_header%5BHost%5D=custom.example.com&request_header%5BUser-Agent%5D=MyBot"
+```
+
+### TLS Bypass for Self-Signed Certificates
+```bash
+curl "http://localhost:8123/api/homie_proxy/external-api-route?token=abc123&url=https://self-signed.example.com&skip_tls_checks=self_signed"
+```
+
+### Streaming Large Files
+```bash
+curl "http://localhost:8123/api/homie_proxy/external-api-route?token=abc123&url=https://example.com/largefile.zip" -o download.zip
+```
+
+### WebSocket Connections
+```bash
+curl -H "Connection: Upgrade" -H "Upgrade: websocket" \
+     "http://localhost:8123/api/homie_proxy/external-api-route?token=abc123&url=wss://echo.websocket.org"
+```
+
+### Custom Response Headers (CORS)
+```bash
+curl "http://localhost:8123/api/homie_proxy/external-api-route?token=abc123&url=https://httpbin.org/get&response_header%5BAccess-Control-Allow-Origin%5D=*"
+```
+
+### Extended Timeout for Long Operations
+```bash
+curl "http://localhost:8123/api/homie_proxy/external-api-route?token=abc123&url=https://slow-api.example.com&timeout=1800"
+```
+
+## URL Encoding
+
+When using special characters in parameter values, ensure proper URL encoding:
+
+| Character | Encoded | Usage |
+|-----------|---------|-------|
+| `[` | `%5B` | Header parameter names |
+| `]` | `%5D` | Header parameter names |
+| `=` | `%3D` | Header parameter values |
+| `&` | `%26` | Header parameter values |
+| `+` | `%2B` | Header parameter values |
+
+## Testing
+
+Run the comprehensive test suite:
+
+```bash
+# All tests
+python tests/run_all_tests.py
+
+# Bash integration tests
+bash test_ha_integration.sh --mode ha --instance INSTANCE_NAME --token TOKEN
+
+# Specific functionality
+python tests/test_http_methods.py
+python tests/test_websocket.py
+python tests/test_streaming_performance.py
 ```
 
 ## Development
 
 ```bash
-# Clone and develop
 git clone <repo>
 cd python-reverse-proxy
 
-# For HA integration development (DevContainer)
-code .  # Open in VS Code
-# Reopen in Container when prompted
-# HA runs at localhost:8123, standalone at localhost:8080
+# DevContainer with pre-configured Home Assistant
+code .  # Open in VS Code and reopen in container
 
-# Run tests
-python tests/run_all_tests.py
-```
-
-The DevContainer provides a complete development environment with Home Assistant pre-configured.
-
-## Features
-
-### 🔒 **Security**
-- **Required token authentication** - No bypass options
-- **Network access control** - Restrict destinations (internal/external/CIDR)
-- **Client IP filtering** - CIDR-based access control
-- **SSRF protection** - Prevents internal network access
-
-### 🚀 **Performance** 
-- **Streaming optimized** - Memory-efficient for large files
-- **WebSocket support** - Real-time connections
-- **Concurrent handling** - Multiple requests simultaneously
-- **All HTTP methods** - GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS
-
-### 🏠 **Home Assistant**
-- **Multiple instances** - Different configs per use case
-- **Native integration** - Uses HA's HTTP framework
-- **Token management** - Automatic UUID generation
-- **Debug interface** - Configuration visibility
-
-## Quick Examples
-
-```bash
-# Stream a large video file
-curl "http://localhost:8123/api/homie_proxy/external-api-route?token=TOKEN&url=https://example.com/video.mp4" -o video.mp4
-
-# POST JSON data
-curl -X POST "http://localhost:8123/api/homie_proxy/external-api-route?token=TOKEN&url=https://httpbin.org/post" \
-     -H "Content-Type: application/json" -d '{"test": "data"}'
-
-# Custom headers and TLS bypass
-curl "http://localhost:8123/api/homie_proxy/external-api-route?token=TOKEN&url=https://self-signed.example.com&skip_tls_checks=all&request_header%5BUser-Agent%5D=CustomBot&request_header%5BHost%5D=custom.example.com"
-
-# Follow redirects
-curl "http://localhost:8123/api/homie_proxy/external-api-route?token=TOKEN&url=https://httpbin.org/redirect/3&follow_redirects=true"
-```
-
-## Configuration
-
-### Network Access Control
-- **`restrict_out: "external"`** - Only allow external/public IPs
-- **`restrict_out: "internal"`** - Only allow private network IPs  
-- **`restrict_out: "any"`** - Allow all destinations
-- **`restrict_out: "10.0.0.0/8"`** - Custom CIDR range
-
-### Client Access Control  
-- **`restrict_in: "192.168.1.0/24"`** - Only allow requests from home network
-- **No `restrict_in`** - Allow requests from any IP
-
-### Per-Instance Configuration (UI)
-
-Each proxy instance can be configured with:
-
-- **Endpoint Name**: Unique identifier for the proxy route
-- **Request Timeout**: 30-3600 seconds (default: 300)
-- **Outbound Access**: any/external/internal/custom CIDR
-- **Inbound Restrictions**: Optional IP/CIDR filtering  
-- **Authentication**: Require HA auth (default: true)
-- **Access Tokens**: One or more authentication tokens
-
-### Usage Examples
-
-```bash
-# Quick API call with custom timeout
-curl "http://localhost:8123/api/homie_proxy/my-instance?token=YOUR_TOKEN&timeout=60&url=https://api.example.com/data"
-
-# Long-running operation with extended timeout
-curl "http://localhost:8123/api/homie_proxy/file-download?token=YOUR_TOKEN&timeout=1800&url=https://files.example.com/large-file.zip"
-
-# WebSocket connection (uses instance timeout)
-curl -H "Connection: Upgrade" -H "Upgrade: websocket" \
-     "http://localhost:8123/api/homie_proxy/websocket-proxy?token=YOUR_TOKEN&url=wss://echo.websocket.org"
-```
-
-### Timeout Priority
-
-1. **Request-level**: `?timeout=600` (overrides instance/default)
-2. **Instance-level**: Configured per proxy instance (30-3600s)
-3. **Default**: 300 seconds if not specified
-
-## Migration from Global Timeout
-
-If you previously used global timeout configuration:
-
-```yaml
-# OLD (no longer supported)
-homie_proxy:
-  timeout: 600
-
-# NEW (per-instance via UI)
-# Configure timeout individually for each proxy instance
-```
-
-Existing instances without timeout configuration will use the 300-second default.
-
-## Testing
-
-Comprehensive test suite with 10+ test files covering:
-- All HTTP methods and data types
-- WebSocket functionality  
-- Redirect following
-- Streaming performance
-- Security and authentication
-- Network access controls
-
-```bash
-# Run all tests
-python tests/run_all_tests.py
-
-# Run specific test
-python tests/test_http_methods.py
+# HA: localhost:8123
+# Standalone: localhost:8080
 ```
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License

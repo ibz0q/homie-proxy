@@ -104,7 +104,7 @@ curl -X POST "http://localhost:8123/api/homie_proxy/external-api-route?token=TOK
      -H "Content-Type: application/json" -d '{"test": "data"}'
 
 # Custom headers and TLS bypass
-curl "http://localhost:8123/api/homie_proxy/external-api-route?token=TOKEN&url=https://self-signed.example.com&skip_tls_checks=all&request_headers%5BUser-Agent%5D=CustomBot"
+curl "http://localhost:8123/api/homie_proxy/external-api-route?token=TOKEN&url=https://self-signed.example.com&skip_tls_checks=all&request_header%5BUser-Agent%5D=CustomBot&request_header%5BHost%5D=custom.example.com"
 
 # Follow redirects
 curl "http://localhost:8123/api/homie_proxy/external-api-route?token=TOKEN&url=https://httpbin.org/redirect/3&follow_redirects=true"
@@ -121,6 +121,52 @@ curl "http://localhost:8123/api/homie_proxy/external-api-route?token=TOKEN&url=h
 ### Client Access Control  
 - **`restrict_in: "192.168.1.0/24"`** - Only allow requests from home network
 - **No `restrict_in`** - Allow requests from any IP
+
+### Per-Instance Configuration (UI)
+
+Each proxy instance can be configured with:
+
+- **Endpoint Name**: Unique identifier for the proxy route
+- **Request Timeout**: 30-3600 seconds (default: 300)
+- **Outbound Access**: any/external/internal/custom CIDR
+- **Inbound Restrictions**: Optional IP/CIDR filtering  
+- **Authentication**: Require HA auth (default: true)
+- **Access Tokens**: One or more authentication tokens
+
+### Usage Examples
+
+```bash
+# Quick API call with custom timeout
+curl "http://localhost:8123/api/homie_proxy/my-instance?token=YOUR_TOKEN&timeout=60&url=https://api.example.com/data"
+
+# Long-running operation with extended timeout
+curl "http://localhost:8123/api/homie_proxy/file-download?token=YOUR_TOKEN&timeout=1800&url=https://files.example.com/large-file.zip"
+
+# WebSocket connection (uses instance timeout)
+curl -H "Connection: Upgrade" -H "Upgrade: websocket" \
+     "http://localhost:8123/api/homie_proxy/websocket-proxy?token=YOUR_TOKEN&url=wss://echo.websocket.org"
+```
+
+### Timeout Priority
+
+1. **Request-level**: `?timeout=600` (overrides instance/default)
+2. **Instance-level**: Configured per proxy instance (30-3600s)
+3. **Default**: 300 seconds if not specified
+
+## Migration from Global Timeout
+
+If you previously used global timeout configuration:
+
+```yaml
+# OLD (no longer supported)
+homie_proxy:
+  timeout: 600
+
+# NEW (per-instance via UI)
+# Configure timeout individually for each proxy instance
+```
+
+Existing instances without timeout configuration will use the 300-second default.
 
 ## Testing
 

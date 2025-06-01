@@ -11,7 +11,7 @@ import voluptuous as vol
 from homeassistant import config_entries, exceptions
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, RESTRICT_OPTIONS
+from .const import DOMAIN, RESTRICT_OPTIONS, DEFAULT_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +25,8 @@ DATA_SCHEMA = vol.Schema({
     vol.Required("restrict_out", default="Allow all networks"): vol.In(RESTRICT_LABELS),
     vol.Optional("restrict_out_cidrs", default=""): str,
     vol.Optional("restrict_in_cidrs", default=""): str,
+    vol.Required("requires_auth", default=True): bool,
+    vol.Optional("timeout", default=DEFAULT_TIMEOUT): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
 })
 
 
@@ -129,6 +131,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "tokens": [initial_token],
                         "restrict_out": final_restrict_out,
                         "restrict_in": restrict_in_cidrs if restrict_in_cidrs else None,
+                        "requires_auth": user_input.get("requires_auth", True),
+                        "timeout": user_input.get("timeout", DEFAULT_TIMEOUT),
                     }
                 )
             except AlreadyConfigured:
@@ -202,6 +206,8 @@ class OptionsFlow(config_entries.OptionsFlow):
                         "tokens": tokens,
                         "restrict_out": final_restrict_out,
                         "restrict_in": restrict_in_cidrs if restrict_in_cidrs else None,
+                        "requires_auth": user_input.get("requires_auth", True),
+                        "timeout": user_input.get("timeout", DEFAULT_TIMEOUT),
                     }
                 )
                 
@@ -225,6 +231,8 @@ class OptionsFlow(config_entries.OptionsFlow):
         current_tokens = self.config_entry.data.get("tokens", [])
         current_restrict_out = self.config_entry.data.get("restrict_out", "any")
         current_restrict_in = self.config_entry.data.get("restrict_in", "")
+        current_requires_auth = self.config_entry.data.get("requires_auth", True)
+        current_timeout = self.config_entry.data.get("timeout", DEFAULT_TIMEOUT)
         
         # Convert current internal value to user-friendly label
         current_restrict_out_label = get_restrict_label(current_restrict_out)
@@ -243,6 +251,8 @@ class OptionsFlow(config_entries.OptionsFlow):
             vol.Required("restrict_out", default=current_restrict_out_label): vol.In(RESTRICT_LABELS),
             vol.Optional("restrict_out_cidrs", default=restrict_out_cidrs_field): str,
             vol.Optional("restrict_in_cidrs", default=current_restrict_in or ""): str,
+            vol.Required("requires_auth", default=current_requires_auth): bool,
+            vol.Optional("timeout", default=current_timeout): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
         })
 
         return self.async_show_form(

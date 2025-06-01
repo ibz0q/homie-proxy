@@ -68,13 +68,13 @@ curl -X DELETE "http://localhost:8123/api/homie_proxy/external-api-route?token=$
 
 ```bash
 # Custom headers
-curl "http://localhost:8123/api/homie_proxy/external-api-route?token=$TOKEN&url=https://httpbin.org/headers&request_headers%5BX-Custom%5D=TestValue"
+curl "http://localhost:8123/api/homie_proxy/external-api-route?token=$TOKEN&url=https://httpbin.org/headers&request_header%5BX-Custom%5D=TestValue"
 
 # TLS bypass for development
 curl "http://localhost:8123/api/homie_proxy/external-api-route?token=$TOKEN&url=https://self-signed.badssl.com&skip_tls_checks=all"
 
 # Host header override
-curl "http://localhost:8123/api/homie_proxy/external-api-route?token=$TOKEN&url=https://httpbin.org/headers&override_host_header=custom.example.com"
+curl "http://localhost:8123/api/homie_proxy/external-api-route?token=$TOKEN&url=https://httpbin.org/headers&request_header%5BHost%5D=custom.example.com"
 
 # Redirect control
 curl "http://localhost:8123/api/homie_proxy/external-api-route?token=$TOKEN&url=https://httpbin.org/redirect/1&follow_redirects=true"

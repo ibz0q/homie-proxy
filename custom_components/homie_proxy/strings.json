@@ -8,7 +8,9 @@
           "name": "Endpoint Name",
           "restrict_out": "Outbound Access Restrictions",
           "restrict_out_cidrs": "Custom CIDR Range",
-          "restrict_in_cidrs": "Inbound IP Restrictions (Optional)"
+          "restrict_in_cidrs": "Inbound IP Restrictions (Optional)",
+          "requires_auth": "Require Home Assistant Authentication",
+          "timeout": "Request Timeout (seconds)"
         }
       }
     },
@@ -32,7 +34,9 @@
           "tokens": "Access Tokens (one per line)",
           "restrict_out": "Outbound Access Restrictions", 
           "restrict_out_cidrs": "Custom CIDR Range",
-          "restrict_in_cidrs": "Inbound IP Restrictions (Optional)"
+          "restrict_in_cidrs": "Inbound IP Restrictions (Optional)",
+          "requires_auth": "Require Home Assistant Authentication",
+          "timeout": "Request Timeout (seconds)"
         }
       }
     },

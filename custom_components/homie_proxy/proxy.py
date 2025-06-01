@@ -22,7 +22,7 @@ from homeassistant.components.http import HomeAssistantView
 from aiohttp import web
 from aiohttp.web_request import Request
 
-from .const import PRIVATE_CIDRS, LOCAL_CIDRS
+from .const import PRIVATE_CIDRS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -202,7 +202,7 @@ async def handle_websocket_proxy(proxy_instance: ProxyInstance, request_data: di
         
         # Add custom request headers
         for key, values in query_params.items():
-            if key.startswith('request_headers[') and key.endswith(']'):
+            if key.startswith('request_header[') and key.endswith(']'):
                 header_name = key[16:-1]
                 ws_headers[header_name] = values[0]
         
@@ -253,7 +253,7 @@ async def async_proxy_request(proxy_instance: ProxyInstance, request_data: dict,
         if timeout_param[0] and timeout_param[0].isdigit():
             timeout_seconds = int(timeout_param[0])
         else:
-            # Use proxy instance timeout (configured in YAML) as default
+            # Use proxy instance timeout (configured per instance) as default
             timeout_seconds = proxy_instance.timeout
         
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
@@ -283,27 +283,27 @@ async def async_proxy_request(proxy_instance: ProxyInstance, request_data: dict,
             async with session.request(**request_kwargs) as response:
                 
                 # Prepare response headers - pass through all headers from target
-                response_headers = {}
-                excluded_response_headers = {
+                response_header = {}
+                excluded_response_header = {
                     'connection', 'transfer-encoding', 'content-encoding'
                 }
                 
                 for header, value in response.headers.items():
-                    if header.lower() not in excluded_response_headers:
-                        response_headers[header] = value
+                    if header.lower() not in excluded_response_header:
+                        response_header[header] = value
                 
                 # Add custom response headers
                 for key, values in query_params.items():
                     if key.startswith('response_header[') and key.endswith(']'):
                         header_name = key[16:-1]
-                        response_headers[header_name] = values[0]
+                        response_header[header_name] = values[0]
                 
                 # If we have the aiohttp request object, do streaming
                 if aiohttp_request:
                     # Create streaming response
                     stream_response = web.StreamResponse(
                         status=response.status,
-                        headers=response_headers
+                        headers=response_header
                     )
                     
                     await stream_response.prepare(aiohttp_request)
@@ -329,7 +329,7 @@ async def async_proxy_request(proxy_instance: ProxyInstance, request_data: dict,
                     return {
                         'success': True,
                         'status': response.status,
-                        'headers': response_headers,
+                        'headers': response_header,
                         'data': response_data,
                         'is_websocket': False
                     }
@@ -513,10 +513,6 @@ class HomieProxyRequestHandler:
             
             self.log_message(f"Authentication successful for instance '{self.proxy_instance.name}'")
             
-            # Handle Host header override logic
-            override_host_header_param = query_params.get('override_host_header', [''])
-            override_host_header = override_host_header_param[0] if override_host_header_param[0] else None
-            
             # Parse target URL for hostname
             parsed_target = urllib.parse.urlparse(target_url)
             original_hostname = parsed_target.hostname
@@ -524,16 +520,20 @@ class HomieProxyRequestHandler:
             # Prepare headers - start with original headers from client
             headers = dict(request.headers)
             
-            # Add custom request headers first
+            # Check if Host header was provided via request_header[Host] parameter
+            host_header_override = None
             for key, values in query_params.items():
-                if key.startswith('request_headers[') and key.endswith(']'):
-                    header_name = key[16:-1]
-                    headers[header_name] = values[0]
+                if key.startswith('request_header[') and key.endswith(']'):
+                    header_name = key[15:-1]
+                    if header_name.lower() == 'host':
+                        host_header_override = values[0]
+                    else:
+                        headers[header_name] = values[0]
             
             # Handle Host header logic
-            if override_host_header:
-                headers['Host'] = override_host_header
-                self.log_message(f"Override Host header set to: {override_host_header}")
+            if host_header_override:
+                headers['Host'] = host_header_override
+                self.log_message(f"Host header override set to: {host_header_override}")
             elif original_hostname:
                 try:
                     ipaddress.ip_address(original_hostname)
@@ -541,7 +541,7 @@ class HomieProxyRequestHandler:
                     self.log_message(f"Target is IP address ({original_hostname}) - no Host header set")
                 except ValueError:
                     headers['Host'] = original_hostname
-                    self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
+                    self.log_message(f"Set Host header to hostname: {headers['Host']}")
             
             # Ensure User-Agent is set
             user_agent_set = any(header.lower() == 'user-agent' for header in headers.keys())
@@ -617,6 +617,8 @@ class HomieProxyService:
         restrict_out: str,
         restrict_in: Optional[str] = None,
         timeout: int = 300,
+        requires_auth: bool = True,
+        debug_requires_auth: bool = False,
     ):
         """Initialize the proxy service."""
         self.hass = hass
@@ -625,6 +627,8 @@ class HomieProxyService:
         self.restrict_out = restrict_out
         self.restrict_in = restrict_in
         self.timeout = timeout
+        self.requires_auth = requires_auth
+        self.debug_requires_auth = debug_requires_auth
         self.view: Optional[HomieProxyView] = None
         self.proxy_instance: Optional[ProxyInstance] = None
 
@@ -646,13 +650,13 @@ class HomieProxyService:
         
         # Register debug view once (only for the first instance)
         if len(_HOMIE_PROXY_INSTANCES) == 1:
-            debug_view = HomieProxyDebugView()
+            debug_view = HomieProxyDebugView(requires_auth=self.debug_requires_auth)
             debug_view.hass = self.hass
             self.hass.http.register_view(debug_view)
             _LOGGER.info("Registered HomieProxy debug endpoint at /api/homie_proxy/debug")
         
         # Create and register the HTTP view
-        self.view = HomieProxyView(proxy_instance=self.proxy_instance)
+        self.view = HomieProxyView(proxy_instance=self.proxy_instance, requires_auth=self.requires_auth)
         self.view.hass = self.hass
         
         try:
@@ -679,12 +683,14 @@ class HomieProxyService:
                 _LOGGER.error("Failed to setup Homie Proxy service '%s': %s", self.name, e)
                 raise
 
-    async def update(self, tokens: List[str], restrict_out: str, restrict_in: Optional[str] = None, timeout: int = 300):
+    async def update(self, tokens: List[str], restrict_out: str, restrict_in: Optional[str] = None, timeout: int = 300, requires_auth: bool = True, debug_requires_auth: bool = False):
         """Update the proxy configuration."""
         self.tokens = tokens
         self.restrict_out = restrict_out
         self.restrict_in = restrict_in
         self.timeout = timeout
+        self.requires_auth = requires_auth
+        self.debug_requires_auth = debug_requires_auth
         
         # Update the proxy instance
         if self.proxy_instance:
@@ -710,8 +716,8 @@ class HomieProxyService:
                     self.proxy_instance.restrict_out = 'any'
             
         _LOGGER.info(
-            "Updated Homie Proxy service '%s' with %d token(s)", 
-            self.name, len(self.tokens)
+            "Updated Homie Proxy service '%s' with %d token(s), timeout=%ds", 
+            self.name, len(self.tokens), self.timeout
         )
 
     async def cleanup(self):
@@ -725,7 +731,7 @@ class HomieProxyService:
 class HomieProxyView(HomeAssistantView):
     """HTTP view for Homie Proxy with aiohttp and WebSocket support."""
 
-    def __init__(self, proxy_instance: ProxyInstance):
+    def __init__(self, proxy_instance: ProxyInstance, requires_auth: bool = True):
         """Initialize the view."""
         self.proxy_instance = proxy_instance
         self.handler = HomieProxyRequestHandler(proxy_instance)
@@ -733,7 +739,14 @@ class HomieProxyView(HomeAssistantView):
         # Set view properties
         self.url = f"/api/homie_proxy/{proxy_instance.name}"
         self.name = f"api:homie_proxy:{proxy_instance.name}"
-        self.requires_auth = False  # We handle auth with tokens
+        
+        # Set requires_auth based on configuration
+        self.requires_auth = requires_auth
+        
+        if requires_auth:
+            _LOGGER.info("Proxy endpoint '%s' requires Home Assistant authentication", proxy_instance.name)
+        else:
+            _LOGGER.info("Proxy endpoint '%s' accessible without HA auth (tokens still required)", proxy_instance.name)
 
     async def get(self, request: Request) -> web.Response:
         """Handle GET request (including WebSocket upgrades)."""
@@ -769,7 +782,18 @@ class HomieProxyDebugView(HomeAssistantView):
     
     url = "/api/homie_proxy/debug"
     name = "api:homie_proxy:debug"
-    requires_auth = False
+    
+    def __init__(self, requires_auth: bool = False):
+        """Initialize the debug view."""
+        super().__init__()
+        
+        # Set requires_auth based on configuration (debug view defaults to no auth for convenience)
+        self.requires_auth = requires_auth
+        
+        if requires_auth:
+            _LOGGER.info("Debug endpoint requires authentication")
+        else:
+            _LOGGER.info("Debug endpoint accessible without auth")
     
     async def get(self, request: Request) -> web.Response:
         """Handle GET request for debug information."""
@@ -786,27 +810,25 @@ class HomieProxyDebugView(HomeAssistantView):
                 "restrict_out": service.restrict_out,
                 "restrict_in": service.restrict_in,
                 "timeout": service.timeout,
+                "requires_auth": service.requires_auth,
                 "endpoint_url": f"/api/homie_proxy/{service.name}",
-                "status": "active" if service.view else "inactive",
-                "websocket_support": True
+                "status": "active" if service.view else "inactive"
             }
         
         # Add system information
         debug_info["system"] = {
             "private_cidrs": PRIVATE_CIDRS,
-            "local_cidrs": LOCAL_CIDRS,
             "available_restrictions": ["any", "external", "internal", "custom"],
-            "proxy_implementation": "aiohttp_with_websocket_support",
-            "features": [
-                "HTTP/HTTPS proxying",
-                "WebSocket proxying", 
-                "Streaming support",
-                "Custom headers",
-                "TLS bypass options",
-                "Authentication",
-                "Network access control",
-                "Configurable timeout"
-            ]
+            "proxy_implementation": "aiohttp_with_websocket_support"
+        }
+        
+        # Add debug information about logging
+        integration_logger = logging.getLogger('custom_components.homie_proxy')
+        debug_info["debug"] = {
+            "logging_level": integration_logger.level,
+            "effective_level": integration_logger.getEffectiveLevel(),
+            "debug_enabled": integration_logger.isEnabledFor(logging.DEBUG),
+            "authentication_required": not integration_logger.isEnabledFor(logging.DEBUG)
         }
         
         # Format as pretty JSON

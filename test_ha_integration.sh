@@ -286,7 +286,7 @@ if [[ "$MODE" == "ha" ]]; then
     
     # Test host header override
     run_test "Host Header Override" \
-        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/headers&override_host_header=custom.example.com" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/headers&request_header%5BHost%5D=custom.example.com" \
         "200" \
         "Host header override functionality"
     

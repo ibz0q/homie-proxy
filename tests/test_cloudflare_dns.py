@@ -9,7 +9,7 @@ print("=" * 60)
 base_url = "http://localhost:8080/default?token=your-secret-token-here"
 
 # Test the Cloudflare DNS over HTTPS endpoint
-test_url = f"{base_url}&url=https://1.1.1.1&override_host_header=one.one.one.one&skip_tls_checks=all"
+test_url = f"{base_url}&url=https://1.1.1.1&request_header%5BHost%5D=one.one.one.one&skip_tls_checks=all"
 
 print(f"\nTesting Cloudflare DNS over HTTPS...")
 print(f"Target: https://1.1.1.1 with Host: one.one.one.one")

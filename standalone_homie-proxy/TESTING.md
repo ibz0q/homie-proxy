@@ -55,7 +55,7 @@ If no port is specified, tests default to port **8080**.
 ### 🔄 Legacy Tests (Fixed Port)
 - `test_proxy.py` - Comprehensive proxy test (still uses hardcoded port)
 - `test_user_agent.py` - User-Agent modification test
-- `test_response_headers.py` - Response header test
+- `test_response_header.py` - Response header test
 - Other legacy tests...
 
 ## Test Runner Features
@@ -118,7 +118,7 @@ Based on recent runs against port 8085:
 - [x] User-Agent handling (blank default)
 - [x] Redirect following control
 - [x] Detailed request/response logging
-- [x] Host header override for IP addresses
+- [x] Added Host header override via request_header[Host] parameter
 
 ## Code Quality
 
@@ -145,7 +145,7 @@ curl "http://localhost:8085/default?token=your-secret-token-here&url=https://htt
 
 ### With Custom Headers
 ```bash
-curl "http://localhost:8085/default?token=your-secret-token-here&url=https://httpbin.org/get&request_headers[User-Agent]=MyBot/1.0"
+curl "http://localhost:8085/default?token=your-secret-token-here&url=https://httpbin.org/get&request_header[User-Agent]=MyBot/1.0"
 ```
 
 ### With TLS Bypass
@@ -160,43 +160,5 @@ curl "http://localhost:8085/default?token=your-secret-token-here&url=https://htt
 
 ### Host Header Override
 ```bash
-curl "http://localhost:8085/default?token=your-secret-token-here&url=http://192.168.1.100/api&override_host_header=myapi.example.com"
+curl "http://localhost:8085/default?token=your-secret-token-here&url=http://192.168.1.100/api&request_header%5BHost%5D=myapi.example.com"
 ```
-
-## Development
-
-### Adding New Tests
-1. Create your test file in the `tests/` directory
-2. Add argument parsing:
-   ```python
-   import argparse
-   import os
-   
-   parser = argparse.ArgumentParser(description='Your test description')
-   parser.add_argument('--port', type=int, 
-                      default=int(os.environ.get('PROXY_PORT', 8080)),
-                      help='Proxy server port')
-   args = parser.parse_args()
-   
-   base_url = f"http://localhost:{args.port}/default?token=your-secret-token-here"
-   ```
-3. Add your test to the `test_files` list in `run_tests.py`
-
-### Running During Development
-```bash
-# Start server
-python homie_proxy.py --port 8085
-
-# In another terminal, run tests
-python run_tests.py --port 8085
-```
-
-## Summary
-
-The homie proxy is now much cleaner and simpler:
-- ✅ **Removed complexity:** No hop-by-hop filtering, simplified header handling
-- ✅ **Improved testing:** Configurable ports for all tests  
-- ✅ **Maintained functionality:** All core proxy features working
-- ✅ **Better logging:** Detailed request/response header logging
-- ✅ **Host header fixes:** Proper IP vs hostname handling with override option
-- ✅ **Production ready:** Minimal dependencies, robust error handling 

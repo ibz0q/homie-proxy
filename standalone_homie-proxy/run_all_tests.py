@@ -77,7 +77,7 @@ test_files = [
         'description': 'Tests blank User-Agent default behavior'
     },
     {
-        'file': 'tests/test_response_headers.py',
+        'file': 'tests/test_response_header.py',
         'name': 'Response Headers',
         'description': 'Tests custom response headers and CORS'
     },

@@ -176,7 +176,7 @@ def main():
         "test_access_control.py",
         "test_tls_fix.py",
         "test_user_agent.py",
-        "test_response_headers.py",
+        "test_response_header.py",
         "test_host_header.py",
     ]
     

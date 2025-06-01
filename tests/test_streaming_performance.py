@@ -274,7 +274,7 @@ def test_binary_content():
     except Exception as e:
         print(f"✗ Binary content test failed: {e}")
 
-def test_response_headers_preservation():
+def test_response_header_preservation():
     """Test that response headers are properly preserved"""
     print("\nTesting response headers preservation...")
     
@@ -367,7 +367,7 @@ def main():
         test_concurrent_requests,
         test_timeout_handling,
         test_binary_content,
-        test_response_headers_preservation,
+        test_response_header_preservation,
         test_compression_handling
     ]
     

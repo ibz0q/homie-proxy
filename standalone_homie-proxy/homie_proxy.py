@@ -215,20 +215,20 @@ async def async_proxy_request(proxy_instance: 'ProxyInstance', request_data: dic
             async with session.request(**request_kwargs) as response:
                 
                 # Prepare response headers - pass through all headers from target
-                response_headers = {}
-                excluded_response_headers = {
+                response_header = {}
+                excluded_response_header = {
                     'connection', 'transfer-encoding', 'content-encoding'
                 }
                 
                 for header, value in response.headers.items():
-                    if header.lower() not in excluded_response_headers:
-                        response_headers[header] = value
+                    if header.lower() not in excluded_response_header:
+                        response_header[header] = value
                 
                 # Add custom response headers
                 for key, values in query_params.items():
                     if key.startswith('response_header[') and key.endswith(']'):
                         header_name = key[16:-1]
-                        response_headers[header_name] = values[0]
+                        response_header[header_name] = values[0]
                 
                 # Read response data
                 response_data = await response.read()
@@ -236,7 +236,7 @@ async def async_proxy_request(proxy_instance: 'ProxyInstance', request_data: dic
                 return {
                     'success': True,
                     'status': response.status,
-                    'headers': response_headers,
+                    'headers': response_header,
                     'data': response_data
                 }
                         
@@ -437,10 +437,6 @@ class HomieProxyRequestHandler:
             if request.can_read_body:
                 body = await request.read()
             
-            # Handle Host header override logic
-            override_host_header_param = query_params.get('override_host_header', [''])
-            override_host_header = override_host_header_param[0] if override_host_header_param[0] else None
-            
             # Parse target URL for hostname
             parsed_target = urllib.parse.urlparse(target_url)
             original_hostname = parsed_target.hostname
@@ -455,17 +451,21 @@ class HomieProxyRequestHandler:
             for header in excluded_headers:
                 headers.pop(header, None)
             
-            # Add custom request headers first (so they can override defaults)
+            # Check if Host header was provided via request_header[Host] parameter
+            host_header_override = None
             for key, values in query_params.items():
                 if key.startswith('request_header[') and key.endswith(']'):
                     header_name = key[15:-1]  # Remove 'request_header[' and ']'
-                    headers[header_name] = values[0]
+                    if header_name.lower() == 'host':
+                        host_header_override = values[0]
+                    else:
+                        headers[header_name] = values[0]
             
             # Handle Host header logic AFTER custom headers so override takes precedence
-            if override_host_header:
+            if host_header_override:
                 # Use explicit override
-                headers['Host'] = override_host_header
-                self.log_message(f"Override Host header set to: {override_host_header}")
+                headers['Host'] = host_header_override
+                self.log_message(f"Host header override set to: {host_header_override}")
             elif original_hostname:
                 # Check if the hostname is an IP address
                 try:
@@ -476,7 +476,7 @@ class HomieProxyRequestHandler:
                 except ValueError:
                     # It's a hostname - set Host header to hostname only (no port)
                     headers['Host'] = original_hostname
-                    self.log_message(f"Fixed Host header to hostname: {headers['Host']}")
+                    self.log_message(f"Set Host header to hostname: {headers['Host']}")
             
             # Always ensure User-Agent is explicitly set (use blank if none provided)
             user_agent_set = False

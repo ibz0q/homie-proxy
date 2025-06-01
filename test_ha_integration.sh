@@ -407,6 +407,22 @@ if [[ "$MODE" == "ha" ]]; then
     echo ""
 fi
 
+# Test 21: Streaming Performance
+URL: http://localhost:8123/api/homie_proxy/external-api-route?token=6d6fdb4c-3b4a-40d4-a54b-116b7a
+09ddfe&url=https://httpbin.org/bytes/1048576
+✅ PASS: Streaming large content (1MB)
+   Status: 200 (expected 200)
+   Time: 2s
+
+# Test 22: OPTIONS Request with CORS Header
+run_test "OPTIONS with CORS" \
+    "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/anything&response_header%5BAccess-Control-Allow-Origin%5D=*" \
+    "200" \
+    "OPTIONS request with custom CORS header" \
+    "OPTIONS"
+
+# Test 23: Video Streaming Performance Comparison
+
 # Summary
 echo "=============================================================="
 echo "TEST SUMMARY"

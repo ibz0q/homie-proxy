@@ -11,16 +11,18 @@ import voluptuous as vol
 from homeassistant import config_entries, exceptions
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, RESTRICT_OPTIONS
 
 _LOGGER = logging.getLogger(__name__)
 
-# Simple schema without SelectSelector to avoid compatibility issues
+# Create a mapping for user-friendly labels while keeping compatibility
+RESTRICT_OPTIONS_MAP = {label: value for value, label in RESTRICT_OPTIONS}
+RESTRICT_LABELS = [label for value, label in RESTRICT_OPTIONS]
+
+# Simple schema with user-friendly labels but no SelectSelector for compatibility
 DATA_SCHEMA = vol.Schema({
     vol.Required("name", default="external-api-route"): str,
-    vol.Required("restrict_out", default="any"): vol.In([
-        "any", "external", "internal", "custom"
-    ]),
+    vol.Required("restrict_out", default="Allow all networks"): vol.In(RESTRICT_LABELS),
     vol.Optional("restrict_out_cidrs", default=""): str,
     vol.Optional("restrict_in_cidrs", default=""): str,
 })
@@ -42,6 +44,19 @@ def validate_cidr(cidr_string: str) -> bool:
         return False
 
 
+def get_restrict_value(user_friendly_label: str) -> str:
+    """Convert user-friendly label to internal value."""
+    return RESTRICT_OPTIONS_MAP.get(user_friendly_label, "any")
+
+
+def get_restrict_label(internal_value: str) -> str:
+    """Convert internal value to user-friendly label."""
+    for value, label in RESTRICT_OPTIONS:
+        if value == internal_value:
+            return label
+    return "Allow all networks"  # default
+
+
 async def validate_input(hass: HomeAssistant, data: dict) -> dict[str, Any]:
     """Validate the user input allows us to connect.
 
@@ -60,8 +75,9 @@ async def validate_input(hass: HomeAssistant, data: dict) -> dict[str, Any]:
         if entry.data.get("name") == name:
             raise AlreadyConfigured
     
-    # Validate outbound restrictions
-    restrict_out = data.get("restrict_out", "any")
+    # Convert user-friendly label to internal value
+    restrict_out_label = data.get("restrict_out", "Allow all networks")
+    restrict_out = get_restrict_value(restrict_out_label)
     restrict_out_cidrs = data.get("restrict_out_cidrs", "").strip()
     
     if restrict_out == "custom":
@@ -90,8 +106,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 info = await validate_input(self.hass, user_input)
                 
+                # Convert user-friendly label to internal value
+                restrict_out_label = user_input.get("restrict_out", "Allow all networks")
+                restrict_out = get_restrict_value(restrict_out_label)
+                
                 # Prepare final restrict_out value
-                restrict_out = user_input.get("restrict_out", "any")
                 if restrict_out == "custom":
                     final_restrict_out = user_input.get("restrict_out_cidrs", "").strip()
                 else:
@@ -156,8 +175,9 @@ class OptionsFlow(config_entries.OptionsFlow):
                     # If no tokens specified, generate a new one
                     tokens = [generate_token()]
                 
-                # Validate restrictions
-                restrict_out = user_input.get("restrict_out", "any")
+                # Convert user-friendly label to internal value
+                restrict_out_label = user_input.get("restrict_out", "Allow all networks")
+                restrict_out = get_restrict_value(restrict_out_label)
                 restrict_out_cidrs = user_input.get("restrict_out_cidrs", "").strip()
                 
                 if restrict_out == "custom":
@@ -175,16 +195,22 @@ class OptionsFlow(config_entries.OptionsFlow):
                     raise InvalidCIDR
                 
                 # Update config entry data
-                new_data = {
-                    **self.config_entry.data,
-                    "tokens": tokens,
-                    "restrict_out": final_restrict_out,
-                    "restrict_in": restrict_in_cidrs if restrict_in_cidrs else None,
-                }
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, 
+                    data={
+                        **self.config_entry.data,
+                        "tokens": tokens,
+                        "restrict_out": final_restrict_out,
+                        "restrict_in": restrict_in_cidrs if restrict_in_cidrs else None,
+                    }
+                )
+                
+                # Reload the integration to apply changes
+                await self.hass.config_entries.async_reload(self.config_entry.entry_id)
                 
                 return self.async_create_entry(
                     title="",
-                    data=new_data
+                    data={}
                 )
                 
             except InvalidToken:
@@ -200,20 +226,21 @@ class OptionsFlow(config_entries.OptionsFlow):
         current_restrict_out = self.config_entry.data.get("restrict_out", "any")
         current_restrict_in = self.config_entry.data.get("restrict_in", "")
         
+        # Convert current internal value to user-friendly label
+        current_restrict_out_label = get_restrict_label(current_restrict_out)
+        
         # Determine current restriction display values
         if current_restrict_out in ["any", "external", "internal"]:
-            restrict_out_dropdown = current_restrict_out
             restrict_out_cidrs_field = ""
         else:
-            restrict_out_dropdown = "custom"
+            # Custom CIDR case
+            current_restrict_out_label = "Custom cidr"
             restrict_out_cidrs_field = current_restrict_out
         
-        # Create schema for options - simplified without SelectSelector
+        # Create schema for options with user-friendly labels
         options_schema = vol.Schema({
             vol.Required("tokens", default='\n'.join(current_tokens)): str,
-            vol.Required("restrict_out", default=restrict_out_dropdown): vol.In([
-                "any", "external", "internal", "custom"
-            ]),
+            vol.Required("restrict_out", default=current_restrict_out_label): vol.In(RESTRICT_LABELS),
             vol.Optional("restrict_out_cidrs", default=restrict_out_cidrs_field): str,
             vol.Optional("restrict_in_cidrs", default=current_restrict_in or ""): str,
         })

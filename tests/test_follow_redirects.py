@@ -245,8 +245,8 @@ def test_redirect_with_custom_headers():
         'url': 'https://httpbin.org/redirect/1',
         'token': token,
         'follow_redirects': 'true',
-        'request_headers[User-Agent]': 'HomieProxy-Redirect-Test/1.0',
-        'request_headers[X-Custom-Header]': 'redirect-test-value'
+        'request_header[User-Agent]': 'HomieProxy-Redirect-Test/1.0',
+        'request_header[X-Custom-Header]': 'redirect-test-value'
     }
     
     try:

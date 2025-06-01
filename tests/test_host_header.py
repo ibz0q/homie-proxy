@@ -84,9 +84,9 @@ for i, test_case in enumerate(test_cases, 1):
         print(f"   ❌ Error: {e}")
 
 print("\n🧪 Test 5: Manual Host header override")
-print("   Testing if custom Host header via request_headers overrides the fix")
+print("   Testing if custom Host header via request_header overrides the fix")
 
-override_url = f"{base_url}&url=https://httpbin.org/headers&request_headers[Host]=custom.example.com"
+override_url = f"{base_url}&url=https://httpbin.org/headers&request_header[Host]=custom.example.com"
 try:
     print("   📥 Making request with custom Host header...")
     response = requests.get(override_url, timeout=8)

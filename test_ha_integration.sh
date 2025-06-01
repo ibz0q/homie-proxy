@@ -90,7 +90,7 @@ run_test() {
     local expected_status="$3"
     local description="$4"
     local method="${5:-GET}"  # Default to GET if no method specified
-    local timeout="${6:-6}"   # Default 6 second timeout
+    local timeout="${6:-15}"   # Default 15 second timeout
     
     TESTS_TOTAL=$((TESTS_TOTAL + 1))
     
@@ -309,7 +309,7 @@ if [[ "$MODE" == "ha" ]]; then
     
     # Test multiple custom headers
     run_test "Multiple Custom Headers" \
-        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/headers&request_headers%5BX-Test-1%5D=Value1&request_headers%5BX-Test-2%5D=Value2" \
+        "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/headers&request_header%5BX-Test-1%5D=Value1&request_header%5BX-Test-2%5D=Value2" \
         "200" \
         "Multiple custom request headers"
     

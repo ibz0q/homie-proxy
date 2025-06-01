@@ -114,7 +114,7 @@ except Exception as e:
 print("\n🧪 Test 4: Test request header logging")
 print("   Adding custom headers to see logging in action")
 
-header_test_url = f"{base_url}&url=https://httpbin.org/headers&skip_tls_checks=ALL&request_headers[X-Custom-Header]=test-value&request_headers[Authorization]=Bearer test-token"
+header_test_url = f"{base_url}&url=https://httpbin.org/headers&skip_tls_checks=ALL&request_header[X-Custom-Header]=test-value&request_header[Authorization]=Bearer test-token"
 try:
     print("📥 Testing request header logging...")
     response = requests.get(header_test_url, timeout=10)

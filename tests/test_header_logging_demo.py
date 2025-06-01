@@ -16,7 +16,7 @@ print("-" * 60)
 # Test 1: Simple GET with custom headers
 print("\nTest 1: GET request with custom headers")
 try:
-    url = f"{base_url}&url=https://httpbin.org/headers&request_headers[User-Agent]=HeaderTest/1.0&request_headers[X-Custom]=TestValue"
+    url = f"{base_url}&url=https://httpbin.org/headers&request_header[User-Agent]=HeaderTest/1.0&request_header[X-Custom]=TestValue"
     response = requests.get(url, timeout=8)
     print(f"Response status: {response.status_code}")
     if response.status_code == 200:

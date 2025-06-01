@@ -82,7 +82,7 @@ def test_cache_with_different_params():
     try:
         # Request with custom header
         params1 = base_params.copy()
-        params1['request_headers[X-Test]'] = 'value1'
+        params1['request_header[X-Test]'] = 'value1'
         
         response1 = requests.get(base_url, params=params1, timeout=8)
         uuid1 = response1.json().get('uuid')
@@ -90,7 +90,7 @@ def test_cache_with_different_params():
         
         # Request with different custom header - should be different cache entry
         params2 = base_params.copy()
-        params2['request_headers[X-Test]'] = 'value2'
+        params2['request_header[X-Test]'] = 'value2'
         
         response2 = requests.get(base_url, params=params2, timeout=8)
         uuid2 = response2.json().get('uuid')
@@ -171,8 +171,8 @@ def test_custom_headers():
     params = {
         'url': 'https://httpbin.org/headers',
         'token': 'your-secret-token-here',
-        'request_headers[User-Agent]': 'TestBot/1.0',
-        'request_headers[X-Custom-Header]': 'test-value',
+        'request_header[User-Agent]': 'TestBot/1.0',
+        'request_header[X-Custom-Header]': 'test-value',
         'response_header[Access-Control-Allow-Origin]': '*',
         'response_header[X-Proxy-Test]': 'success'
     }

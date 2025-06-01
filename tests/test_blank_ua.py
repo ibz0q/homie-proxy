@@ -85,11 +85,11 @@ try:
 except Exception as e:
     print(f"❌ Error: {e}")
 
-# Test 4: User-Agent via request_headers parameter
-print("\n🔸 Test 4: User-Agent via request_headers parameter")
+# Test 4: User-Agent via request_header parameter
+print("\n🔸 Test 4: User-Agent via request_header parameter")
 print("-" * 40)
 url_ua = "URLParamAgent/1.0"
-url_with_ua = f"{base_url}&request_headers[User-Agent]={url_ua.replace('/', '%2F')}"
+url_with_ua = f"{base_url}&request_header[User-Agent]={url_ua.replace('/', '%2F')}"
 try:
     response = requests.get(url_with_ua)
     data = response.json()

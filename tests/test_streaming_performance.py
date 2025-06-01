@@ -123,7 +123,7 @@ def test_concurrent_requests():
         params = {
             'url': f'https://httpbin.org/delay/1?thread={thread_id}',
             'token': token,
-            'request_headers[X-Thread-ID]': str(thread_id)
+            'request_header[X-Thread-ID]': str(thread_id)
         }
         
         try:
@@ -328,7 +328,7 @@ def test_compression_handling():
     params = {
         'url': 'https://httpbin.org/gzip',
         'token': token,
-        'request_headers[Accept-Encoding]': 'gzip, deflate'
+        'request_header[Accept-Encoding]': 'gzip, deflate'
     }
     
     try:

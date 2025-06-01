@@ -28,7 +28,7 @@ def test_get_method():
     params = {
         'url': 'https://httpbin.org/get',
         'token': token,
-        'request_headers[X-Test-Method]': 'GET'
+        'request_header[X-Test-Method]': 'GET'
     }
     
     try:
@@ -62,7 +62,7 @@ def test_post_method():
     params = {
         'url': 'https://httpbin.org/post',
         'token': token,
-        'request_headers[X-Test-Method]': 'POST'
+        'request_header[X-Test-Method]': 'POST'
     }
     
     test_data = {
@@ -104,7 +104,7 @@ def test_put_method():
     params = {
         'url': 'https://httpbin.org/put',
         'token': token,
-        'request_headers[X-Test-Method]': 'PUT'
+        'request_header[X-Test-Method]': 'PUT'
     }
     
     test_data = {
@@ -146,7 +146,7 @@ def test_patch_method():
     params = {
         'url': 'https://httpbin.org/patch',
         'token': token,
-        'request_headers[X-Test-Method]': 'PATCH'
+        'request_header[X-Test-Method]': 'PATCH'
     }
     
     test_data = {
@@ -188,7 +188,7 @@ def test_delete_method():
     params = {
         'url': 'https://httpbin.org/delete',
         'token': token,
-        'request_headers[X-Test-Method]': 'DELETE'
+        'request_header[X-Test-Method]': 'DELETE'
     }
     
     try:
@@ -222,7 +222,7 @@ def test_head_method():
     params = {
         'url': 'https://httpbin.org/get',
         'token': token,
-        'request_headers[X-Test-Method]': 'HEAD'
+        'request_header[X-Test-Method]': 'HEAD'
     }
     
     try:
@@ -277,7 +277,7 @@ def test_method_with_form_data():
     params = {
         'url': 'https://httpbin.org/post',
         'token': token,
-        'request_headers[Content-Type]': 'application/x-www-form-urlencoded'
+        'request_header[Content-Type]': 'application/x-www-form-urlencoded'
     }
     
     form_data = {
@@ -317,7 +317,7 @@ def test_method_with_raw_data():
     params = {
         'url': 'https://httpbin.org/post',
         'token': token,
-        'request_headers[Content-Type]': 'text/plain'
+        'request_header[Content-Type]': 'text/plain'
     }
     
     raw_data = "This is raw text data for testing POST method with custom content type."

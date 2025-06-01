@@ -42,7 +42,7 @@ except Exception as e:
 print("\nTest 3: Host header with IP address")
 try:
     # Use a test service that accepts any Host header
-    url = f"{base_url}&url=http://httpbin.org/headers&request_headers[X-Original-URL]=http://1.1.1.1/"
+    url = f"{base_url}&url=http://httpbin.org/headers&request_header[X-Original-URL]=http://1.1.1.1/"
     response = requests.get(url, timeout=8)
     print(f"Status: {response.status_code}")
     if response.status_code == 200:

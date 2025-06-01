@@ -24,7 +24,7 @@ print("\n📋 Testing request header logging functionality")
 print("-" * 50)
 
 print("\n🧪 Test 1: Simple GET request with custom headers")
-simple_url = f"{base_url}&url=https://httpbin.org/headers&request_headers[X-Custom-Header]=MyValue&request_headers[X-Test-ID]=12345"
+simple_url = f"{base_url}&url=https://httpbin.org/headers&request_header[X-Custom-Header]=MyValue&request_header[X-Test-ID]=12345"
 
 try:
     print("📥 Making simple GET request...")
@@ -50,7 +50,7 @@ except Exception as e:
     print(f"❌ Error: {e}")
 
 print("\n🧪 Test 2: POST request with body and headers")
-post_url = f"{base_url}&url=https://httpbin.org/post&request_headers[Content-Type]=application/json&request_headers[Authorization]=Bearer test-token"
+post_url = f"{base_url}&url=https://httpbin.org/post&request_header[Content-Type]=application/json&request_header[Authorization]=Bearer test-token"
 
 try:
     print("📥 Making POST request with body...")
@@ -70,7 +70,7 @@ except Exception as e:
     print(f"❌ Error: {e}")
 
 print("\n🧪 Test 3: Request with User-Agent override")
-ua_url = f"{base_url}&url=https://httpbin.org/user-agent&request_headers[User-Agent]=Custom-Proxy-Client/1.0"
+ua_url = f"{base_url}&url=https://httpbin.org/user-agent&request_header[User-Agent]=Custom-Proxy-Client/1.0"
 
 try:
     print("📥 Making request with custom User-Agent...")
@@ -96,9 +96,9 @@ except Exception as e:
 
 print("\n🧪 Test 4: Request with many headers (logging truncation test)")
 many_headers_url = f"{base_url}&url=https://httpbin.org/headers"
-many_headers_url += "&request_headers[X-Long-Header]=" + "A" * 150  # Very long header value
-many_headers_url += "&request_headers[X-Short]=value"
-many_headers_url += "&request_headers[X-Another]=test"
+many_headers_url += "&request_header[X-Long-Header]=" + "A" * 150  # Very long header value
+many_headers_url += "&request_header[X-Short]=value"
+many_headers_url += "&request_header[X-Another]=test"
 
 try:
     print("📥 Making request with many headers including very long one...")

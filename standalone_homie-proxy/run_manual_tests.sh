@@ -64,7 +64,7 @@ run_test "TLS Bypass" \
 
 # Test 5: Custom Headers
 run_test "Custom Request Headers" \
-    'curl -s "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/headers&request_headers%5BX-Custom%5D=TestValue"' \
+    'curl -s "http://localhost:8080/default?token=your-secret-token-here&url=https://httpbin.org/headers&request_header%5BX-Custom%5D=TestValue"' \
     'X-Custom.*TestValue'
 
 # Test 6: User-Agent Preservation

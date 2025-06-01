@@ -457,8 +457,8 @@ class HomieProxyRequestHandler:
             
             # Add custom request headers first (so they can override defaults)
             for key, values in query_params.items():
-                if key.startswith('request_headers[') and key.endswith(']'):
-                    header_name = key[16:-1]  # Remove 'request_headers[' and ']'
+                if key.startswith('request_header[') and key.endswith(']'):
+                    header_name = key[15:-1]  # Remove 'request_header[' and ']'
                     headers[header_name] = values[0]
             
             # Handle Host header logic AFTER custom headers so override takes precedence

@@ -29,7 +29,7 @@ def make_concurrent_request(request_id: int, delay: int = 2) -> dict:
     params = {
         'url': f'https://httpbin.org/delay/{delay}?request_id={request_id}',
         'token': token,
-        'request_headers[X-Request-ID]': str(request_id)
+        'request_header[X-Request-ID]': str(request_id)
     }
     
     start_time = time.time()

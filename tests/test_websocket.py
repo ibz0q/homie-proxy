@@ -32,10 +32,10 @@ def test_websocket_upgrade_request():
     params = {
         'url': target_url,
         'token': token,
-        'request_headers[Connection]': 'Upgrade',
-        'request_headers[Upgrade]': 'websocket',
-        'request_headers[Sec-WebSocket-Version]': '13',
-        'request_headers[Sec-WebSocket-Key]': 'dGhlIHNhbXBsZSBub25jZQ=='
+        'request_header[Connection]': 'Upgrade',
+        'request_header[Upgrade]': 'websocket',
+        'request_header[Sec-WebSocket-Version]': '13',
+        'request_header[Sec-WebSocket-Key]': 'dGhlIHNhbXBsZSBub25jZQ=='
     }
     
     url = f"{BASE_URL}/{proxy_name}"
@@ -134,8 +134,8 @@ def test_websocket_custom_headers():
     params = {
         'url': target_url,
         'token': token,
-        'request_headers[User-Agent]': 'HomieProxy-WebSocket-Test/1.0',
-        'request_headers[X-Custom-Header]': 'test-value'
+        'request_header[User-Agent]': 'HomieProxy-WebSocket-Test/1.0',
+        'request_header[X-Custom-Header]': 'test-value'
     }
     
     url = f"{BASE_URL}/{proxy_name}"

@@ -58,10 +58,10 @@ print("\n\n2. TESTING CUSTOM REQUEST HEADERS WITH USER-AGENT")
 print("=" * 60)
 
 # Test using the proxy's custom header feature
-custom_ua = "CustomProxy/2.0 (via request_headers parameter)"
-custom_header_url = f"{base_url}&request_headers[User-Agent]={custom_ua.replace(' ', '%20')}"
+custom_ua = "CustomProxy/2.0 (via request_header parameter)"
+custom_header_url = f"{base_url}&request_header[User-Agent]={custom_ua.replace(' ', '%20')}"
 
-print(f"\n🔸 Testing with request_headers parameter...")
+print(f"\n🔸 Testing with request_header parameter...")
 print("-" * 50)
 
 try:

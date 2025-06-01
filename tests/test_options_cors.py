@@ -153,7 +153,7 @@ print("\n🔸 Test 4: OPTIONS with custom response header")
 print("-" * 40)
 
 # Test 4: OPTIONS with custom non-CORS header
-custom_url = f"{base_url}&url=https://httpbin.org/anything&response_header[X-Custom-Test]=OPTIONS-Test-Value"
+custom_url = f"{base_url}?{token_param}url=https://httpbin.org/anything&response_header[X-Custom-Test]=OPTIONS-Test-Value"
 
 try:
     print("📥 Making OPTIONS request with custom header...")

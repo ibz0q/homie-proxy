@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  homie-proxy-standalone:
+    build: .
+    container_name: homie-proxy-standalone
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./proxy_config.json:/app/proxy_config.json:ro
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/debug')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - homie-proxy-network
+
+networks:
+  homie-proxy-network:
+    driver: bridge 

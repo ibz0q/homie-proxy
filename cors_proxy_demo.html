@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HomieProxy Simple Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .input-section {
+            margin-bottom: 20px;
+        }
+        .input-section label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .input-section input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+            font-family: monospace;
+        }
+        .input-section select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+            background: white;
+        }
+        .input-section textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+            font-family: monospace;
+            resize: vertical;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .response-content {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .response-headers {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 10px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 CORS Preflight Test Demo</h1>
+        <p>Test different HTTP methods and custom headers to trigger CORS preflight requests.</p>
+        
+        <div class="input-section">
+            <label for="targetUrl">URL to Fetch:</label>
+            <input type="text" id="targetUrl" value="http://10.0.0.5" placeholder="Enter any URL (e.g., http://192.168.1.1, https://api.example.com)">
+        </div>
+
+        <div class="input-section">
+            <label for="httpMethod">HTTP Method:</label>
+            <select id="httpMethod">
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="DELETE">DELETE</option>
+                <option value="PATCH">PATCH</option>
+                <option value="HEAD">HEAD</option>
+                <option value="OPTIONS">OPTIONS</option>
+            </select>
+        </div>
+
+        <div class="input-section">
+            <label for="customHeaders">Custom Headers (JSON format, optional):</label>
+            <input type="text" id="customHeaders" placeholder='{"Content-Type": "application/json", "X-Custom-Header": "value"}'>
+        </div>
+
+        <div class="input-section">
+            <label for="requestBody">Request Body (for POST/PUT/PATCH):</label>
+            <textarea id="requestBody" rows="4" placeholder='{"key": "value"}'></textarea>
+        </div>
+
+        <div>
+            <button onclick="fetchUrl()">🌐 Fetch URL</button>
+            <button onclick="clearResults()">🧹 Clear</button>
+        </div>
+
+        <div id="status"></div>
+        <div id="results"></div>
+    </div>
+
+    <script>
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        function appendResult(title, content, headers = null) {
+            const resultsDiv = document.getElementById('results');
+            
+            let headerSection = '';
+            if (headers) {
+                headerSection = `
+                    <div class="response-headers">
+                        <strong>Response Headers:</strong><br>
+                        <pre>${headers}</pre>
+                    </div>
+                `;
+            }
+            
+            const resultHtml = `
+                <div class="response-content">
+                    <h4>${title}</h4>
+                    ${headerSection}
+                    <pre>${content}</pre>
+                </div>
+            `;
+            
+            resultsDiv.innerHTML = resultHtml;
+        }
+
+        function clearResults() {
+            document.getElementById('results').innerHTML = '';
+            document.getElementById('status').innerHTML = '';
+        }
+
+        async function fetchUrl() {
+            const targetUrl = document.getElementById('targetUrl').value.trim();
+            const httpMethod = document.getElementById('httpMethod').value;
+            const customHeadersInput = document.getElementById('customHeaders').value.trim();
+            const requestBody = document.getElementById('requestBody').value.trim();
+            
+            if (!targetUrl) {
+                showStatus('❌ Please enter a URL', 'error');
+                return;
+            }
+            
+            showStatus(`🔄 Fetching URL with ${httpMethod}...`, 'info');
+            
+            try {
+                console.log('Fetching URL:', targetUrl, 'Method:', httpMethod);
+                
+                // Parse custom headers if provided
+                let headers = {};
+                if (customHeadersInput) {
+                    try {
+                        headers = JSON.parse(customHeadersInput);
+                    } catch (e) {
+                        showStatus('❌ Invalid JSON in custom headers', 'error');
+                        return;
+                    }
+                }
+                
+                // Build fetch options
+                const fetchOptions = {
+                    method: httpMethod,
+                    headers: headers
+                };
+                
+                // Add body for methods that support it
+                if (['POST', 'PUT', 'PATCH'].includes(httpMethod) && requestBody) {
+                    fetchOptions.body = requestBody;
+                    
+                    // Auto-set Content-Type if not already set and body looks like JSON
+                    if (!headers['Content-Type'] && !headers['content-type']) {
+                        try {
+                            JSON.parse(requestBody);
+                            fetchOptions.headers['Content-Type'] = 'application/json';
+                        } catch (e) {
+                            // Not JSON, leave as is
+                        }
+                    }
+                }
+                
+                const response = await fetch(targetUrl, fetchOptions);
+                
+                // Get response headers
+                const responseHeaders = {};
+                response.headers.forEach((value, key) => {
+                    responseHeaders[key] = value;
+                });
+                
+                const headersText = Object.entries(responseHeaders)
+                    .map(([key, value]) => `${key}: ${value}`)
+                    .join('\n');
+                
+                if (response.ok) {
+                    const contentType = response.headers.get('content-type') || '';
+                    let content;
+                    
+                    if (httpMethod === 'HEAD') {
+                        content = '(HEAD request - no body)';
+                    } else if (contentType.includes('application/json')) {
+                        const jsonData = await response.json();
+                        content = JSON.stringify(jsonData, null, 2);
+                    } else if (contentType.includes('text/')) {
+                        content = await response.text();
+                    } else {
+                        // For binary content, show info about it
+                        const arrayBuffer = await response.arrayBuffer();
+                        content = `Binary content (${arrayBuffer.byteLength} bytes)\nContent-Type: ${contentType}`;
+                    }
+                    
+                    showStatus(`✅ Successfully fetched ${targetUrl} with ${httpMethod}`, 'success');
+                    appendResult(`${httpMethod} Response from ${targetUrl}`, content, headersText);
+                    
+                } else {
+                    const errorText = httpMethod === 'HEAD' ? '(HEAD request - no body)' : await response.text();
+                    showStatus(`❌ Request failed: HTTP ${response.status}`, 'error');
+                    appendResult(`Error (${response.status})`, errorText, headersText);
+                }
+                
+            } catch (error) {
+                showStatus(`❌ Request failed: ${error.message}`, 'error');
+                appendResult('Fetch Error', error.toString());
+            }
+        }
+
+        // Allow Enter key to fetch
+        document.getElementById('targetUrl').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                fetchUrl();
+            }
+        });
+    </script>
+</body>
+</html> 

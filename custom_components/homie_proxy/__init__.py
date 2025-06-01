@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List
 
+import voluptuous as vol
+
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -24,6 +26,13 @@ _LOGGER = logging.getLogger(__name__)
 
 # Platforms that this integration supports
 PLATFORMS: list[Platform] = []
+
+# Configuration schema for YAML setup
+CONFIG_SCHEMA = vol.Schema({
+    DOMAIN: vol.Schema({
+        vol.Optional("timeout", default=300): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
+    })
+}, extra=vol.ALLOW_EXTRA)
 
 
 def migrate_config_data(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -51,6 +60,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # Initialize domain data
     hass.data.setdefault(DOMAIN, {})
     
+    # Read global configuration from YAML
+    homie_config = config.get(DOMAIN, {})
+    global_timeout = homie_config.get("timeout", 300)
+    
+    # Store global configuration
+    hass.data[DOMAIN]["global_config"] = {
+        "timeout": global_timeout
+    }
+    
+    _LOGGER.info("HomieProxy global config: timeout=%ds", global_timeout)
+    
     return True
 
 
@@ -72,6 +92,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     restrict_out = config.get("restrict_out")
     restrict_in = config.get("restrict_in")
     
+    # Get global timeout configuration
+    global_config = hass.data[DOMAIN].get("global_config", {})
+    timeout = global_config.get("timeout", 300)
+    
     if not tokens:
         _LOGGER.error("No tokens configured for Homie Proxy instance '%s'", name)
         raise ConfigEntryNotReady("No tokens configured")
@@ -83,7 +107,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             name=name,
             tokens=tokens,
             restrict_out=restrict_out,
-            restrict_in=restrict_in
+            restrict_in=restrict_in,
+            timeout=timeout
         )
         
         # Store service instance
@@ -143,11 +168,16 @@ async def async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None
     restrict_out = config.get("restrict_out")
     restrict_in = config.get("restrict_in")
     
+    # Get global timeout configuration
+    global_config = hass.data[DOMAIN].get("global_config", {})
+    timeout = global_config.get("timeout", 300)
+    
     # Update the service
     await proxy_service.update(
         tokens=tokens,
         restrict_out=restrict_out,
-        restrict_in=restrict_in
+        restrict_in=restrict_in,
+        timeout=timeout
     )
     
     # Update stored config

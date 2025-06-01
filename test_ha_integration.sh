@@ -324,14 +324,12 @@ if [[ "$MODE" == "ha" ]]; then
         -o /dev/null 2>/dev/null)
     stream_end=$(date +%s.%N)
     stream_code=$(echo "$stream_response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-    stream_time=$(echo "$stream_end - $stream_start" | bc 2>/dev/null || echo "N/A")
+    stream_time=$(echo "$stream_end $stream_start" | awk '{printf "%.2f", $1-$2}')
     
     if [[ "$stream_code" == "200" ]]; then
         echo "✅ PASS: Streaming large content (1MB)"
         echo "   Status: $stream_code (expected 200)"
-        if [[ "$stream_time" != "N/A" ]]; then
-            echo "   Time: ${stream_time}s"
-        fi
+        echo "   Time: ${stream_time}s"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         echo "❌ FAIL: Streaming large content (1MB)"
@@ -344,27 +342,32 @@ if [[ "$MODE" == "ha" ]]; then
     TESTS_TOTAL=$((TESTS_TOTAL + 1))
     
     VIDEO_URL="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-    DOWNLOAD_TIMEOUT=10  # 10 second timeout for partial download
+    DOWNLOAD_TIMEOUT=60  # 60 second timeout for large video download
     
     echo "Comparing video streaming performance (${DOWNLOAD_TIMEOUT}s timeout):"
     echo "Video URL: $VIDEO_URL"
     
     # Test direct curl performance
     echo "Testing direct curl..."
+    echo "Direct URL: $VIDEO_URL"
     direct_start=$(date +%s.%N)
     direct_result=$(timeout $DOWNLOAD_TIMEOUT curl -s "$VIDEO_URL" -o /dev/null -w "%{size_download}" 2>/dev/null)
     direct_exit_code=$?
     direct_end=$(date +%s.%N)
-    direct_time=$(echo "$direct_end - $direct_start" | bc 2>/dev/null || echo "N/A")
+    # Use awk for floating point arithmetic since bc is not available on Windows
+    direct_time=$(echo "$direct_end $direct_start" | awk '{printf "%.2f", $1-$2}')
     direct_bytes=${direct_result:-0}
     
     # Test HA HomieProxy performance  
     echo "Testing HA HomieProxy..."
+    proxy_url="$BASE_URL?${TOKEN_PARAM}url=$VIDEO_URL"
+    echo "Proxy URL: $proxy_url"
     proxy_start=$(date +%s.%N)
-    proxy_result=$(timeout $DOWNLOAD_TIMEOUT curl -s "$BASE_URL?${TOKEN_PARAM}url=$VIDEO_URL" -o /dev/null -w "%{size_download}" 2>/dev/null)
+    proxy_result=$(timeout $DOWNLOAD_TIMEOUT curl -s "$proxy_url" -o /dev/null -w "%{size_download}" 2>/dev/null)
     proxy_exit_code=$?
     proxy_end=$(date +%s.%N)
-    proxy_time=$(echo "$proxy_end - $proxy_start" | bc 2>/dev/null || echo "N/A")
+    # Use awk for floating point arithmetic since bc is not available on Windows
+    proxy_time=$(echo "$proxy_end $proxy_start" | awk '{printf "%.2f", $1-$2}')
     proxy_bytes=${proxy_result:-0}
     
     echo "Results:"
@@ -372,20 +375,22 @@ if [[ "$MODE" == "ha" ]]; then
     echo "   HA HomieProxy:  ${proxy_time}s, ${proxy_bytes} bytes, exit_code: $proxy_exit_code"
     
     # Calculate performance ratio if both have valid times
-    if [[ "$direct_time" != "N/A" && "$proxy_time" != "N/A" && $(echo "$direct_time > 0" | bc 2>/dev/null) -eq 1 ]]; then
+    if [[ $(echo "$direct_time > 0" | awk '{print ($1 > 0)}') -eq 1 && $(echo "$proxy_time > 0" | awk '{print ($1 > 0)}') -eq 1 ]]; then
         # Calculate if HA is within 50% of direct performance (1.5x slower is acceptable)
-        max_acceptable_time=$(echo "$direct_time * 1.5" | bc 2>/dev/null)
-        performance_ratio=$(echo "scale=2; $proxy_time / $direct_time" | bc 2>/dev/null)
+        max_acceptable_time=$(echo "$direct_time" | awk '{printf "%.2f", $1 * 1.5}')
+        performance_ratio=$(echo "$proxy_time $direct_time" | awk '{printf "%.2f", $1/$2}')
         
-        echo "   Performance ratio: ${performance_ratio}x (HA vs Direct)"
-        echo "   Max acceptable ratio: 1.5x (50% slower)"
+        echo "   Performance comparison:"
+        echo "   - Direct time: ${direct_time}s"
+        echo "   - Proxy time: ${proxy_time}s"
+        echo "   - Max acceptable proxy time: ${max_acceptable_time}s"
+        echo "   - Performance ratio: ${performance_ratio}x (HA vs Direct)"
         
         # Test passes if:
         # 1. Both downloaded some data (streaming works)
         # 2. HA performance is within 50% of direct (ratio <= 1.5)
-        # 3. Both should timeout (exit code 124) since it's a large file
         if [[ $direct_bytes -gt 0 && $proxy_bytes -gt 0 ]]; then
-            if [[ $(echo "$proxy_time <= $max_acceptable_time" | bc 2>/dev/null) -eq 1 ]]; then
+            if [[ $(echo "$performance_ratio <= 1.5" | awk '{print ($1 <= 1.5)}') -eq 1 ]]; then
                 echo "✅ PASS: Video streaming performance within acceptable range"
                 echo "   Both direct and proxy successfully streamed data"
                 TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -401,27 +406,19 @@ if [[ "$MODE" == "ha" ]]; then
             fi
         fi
     else
-        echo "❌ FAIL: Could not calculate performance metrics"
-        echo "   This suggests timing measurement issues"
+        echo "❌ FAIL: Invalid timing measurements"
+        echo "   Direct time: ${direct_time}s, Proxy time: ${proxy_time}s"
+        echo "   Both times must be greater than 0"
     fi
     echo ""
 fi
 
-# Test 21: Streaming Performance
-URL: http://localhost:8123/api/homie_proxy/external-api-route?token=6d6fdb4c-3b4a-40d4-a54b-116b7a
-09ddfe&url=https://httpbin.org/bytes/1048576
-✅ PASS: Streaming large content (1MB)
-   Status: 200 (expected 200)
-   Time: 2s
-
-# Test 22: OPTIONS Request with CORS Header
+# Test OPTIONS with CORS
 run_test "OPTIONS with CORS" \
     "$BASE_URL?${TOKEN_PARAM}url=https://httpbin.org/anything&response_header%5BAccess-Control-Allow-Origin%5D=*" \
     "200" \
     "OPTIONS request with custom CORS header" \
     "OPTIONS"
-
-# Test 23: Video Streaming Performance Comparison
 
 # Summary
 echo "=============================================================="

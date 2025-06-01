@@ -33,12 +33,13 @@ _HOMIE_PROXY_INSTANCES = {}
 class ProxyInstance:
     """Configuration for a proxy instance"""
     
-    def __init__(self, name: str, tokens: List[str], restrict_out: str, restrict_in: Optional[str] = None):
+    def __init__(self, name: str, tokens: List[str], restrict_out: str, restrict_in: Optional[str] = None, timeout: int = 300):
         self.name = name
         self.restrict_out = restrict_out
         self.restrict_out_cidrs = []
         self.tokens = set(tokens)
         self.restrict_in_cidrs = []
+        self.timeout = timeout  # Add timeout configuration
         
         # Handle custom CIDR for restrict_out
         if restrict_out not in ['any', 'external', 'internal']:
@@ -247,8 +248,16 @@ async def async_proxy_request(proxy_instance: ProxyInstance, request_data: dict,
         follow_redirects_param = query_params.get('follow_redirects', ['false'])
         follow_redirects = follow_redirects_param[0].lower() in ['true', '1', 'yes']
         
-        # Configure timeout
-        timeout = aiohttp.ClientTimeout(total=30)
+        # Configure timeout - much longer for streaming, configurable via query parameter
+        timeout_param = query_params.get('timeout', [''])
+        if timeout_param[0] and timeout_param[0].isdigit():
+            timeout_seconds = int(timeout_param[0])
+        else:
+            # Use proxy instance timeout (configured in YAML) as default
+            timeout_seconds = proxy_instance.timeout
+        
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        _LOGGER.info(f"Using timeout: {timeout_seconds}s for {'streaming' if aiohttp_request else 'regular'} request")
         
         # Configure connector with SSL context
         connector = aiohttp.TCPConnector(ssl=ssl_context) if ssl_context else None
@@ -607,6 +616,7 @@ class HomieProxyService:
         tokens: List[str],
         restrict_out: str,
         restrict_in: Optional[str] = None,
+        timeout: int = 300,
     ):
         """Initialize the proxy service."""
         self.hass = hass
@@ -614,6 +624,7 @@ class HomieProxyService:
         self.tokens = tokens
         self.restrict_out = restrict_out
         self.restrict_in = restrict_in
+        self.timeout = timeout
         self.view: Optional[HomieProxyView] = None
         self.proxy_instance: Optional[ProxyInstance] = None
 
@@ -626,7 +637,8 @@ class HomieProxyService:
             name=self.name,
             tokens=self.tokens,
             restrict_out=self.restrict_out,
-            restrict_in=self.restrict_in
+            restrict_in=self.restrict_in,
+            timeout=self.timeout
         )
         
         # Register this instance in the global registry
@@ -649,16 +661,25 @@ class HomieProxyService:
             self.name, self.name, len(self.tokens)
         )
 
-    async def update(self, tokens: List[str], restrict_out: str, restrict_in: Optional[str] = None):
+    async def update(self, tokens: List[str], restrict_out: str, restrict_in: Optional[str] = None, timeout: int = 300):
         """Update the proxy configuration."""
         self.tokens = tokens
         self.restrict_out = restrict_out
         self.restrict_in = restrict_in
+        self.timeout = timeout
         
         # Update the proxy instance
         if self.proxy_instance:
             self.proxy_instance.tokens = set(tokens)
             self.proxy_instance.restrict_out = restrict_out
+            self.proxy_instance.restrict_in_cidrs = []
+            if restrict_in:
+                try:
+                    self.proxy_instance.restrict_in_cidrs = [ipaddress.ip_network(restrict_in, strict=False)]
+                except ValueError:
+                    _LOGGER.warning("Invalid restrict_in CIDR: %s, ignoring", restrict_in)
+                    self.proxy_instance.restrict_in_cidrs = []
+            self.proxy_instance.timeout = timeout
             
             # Handle custom CIDR for restrict_out
             self.proxy_instance.restrict_out_cidrs = []
@@ -669,15 +690,6 @@ class HomieProxyService:
                 except ValueError:
                     _LOGGER.warning("Invalid restrict_out CIDR: %s, defaulting to 'any'", restrict_out)
                     self.proxy_instance.restrict_out = 'any'
-            
-            # Handle restrict_in CIDR
-            self.proxy_instance.restrict_in_cidrs = []
-            if restrict_in:
-                try:
-                    self.proxy_instance.restrict_in_cidrs = [ipaddress.ip_network(restrict_in, strict=False)]
-                except ValueError:
-                    _LOGGER.warning("Invalid restrict_in CIDR: %s, ignoring", restrict_in)
-                    self.proxy_instance.restrict_in_cidrs = []
             
         _LOGGER.info(
             "Updated Homie Proxy service '%s' with %d token(s)", 
@@ -755,6 +767,7 @@ class HomieProxyDebugView(HomeAssistantView):
                 "tokens": service.tokens,
                 "restrict_out": service.restrict_out,
                 "restrict_in": service.restrict_in,
+                "timeout": service.timeout,
                 "endpoint_url": f"/api/homie_proxy/{service.name}",
                 "status": "active" if service.view else "inactive",
                 "websocket_support": True
@@ -773,7 +786,8 @@ class HomieProxyDebugView(HomeAssistantView):
                 "Custom headers",
                 "TLS bypass options",
                 "Authentication",
-                "Network access control"
+                "Network access control",
+                "Configurable timeout"
             ]
         }
         

@@ -54,4 +54,8 @@ logger:
   default: info
   logs:
     custom_components.homie_proxy: debug
-    homeassistant.components.homie_proxy: debug 
+    homeassistant.components.homie_proxy: debug
+
+# HomieProxy configuration
+homie_proxy:
+  timeout: 300  # Timeout in seconds (300 = 5 minutes) 

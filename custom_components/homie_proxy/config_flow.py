@@ -457,7 +457,10 @@ class OptionsFlow(config_entries.OptionsFlow):
         first_token = data["tokens"][0] if data["tokens"] else "(no tokens)"
         endpoint = f"/api/homie_proxy/{data['name']}"
 
-        base = "<ha-host>:8123"
+        # Placeholder hostname shown in examples. Avoid `<…>` because HA's
+        # markdown renderer parses those as unclosed HTML tags (UNCLOSED_TAG
+        # translation error).
+        base = "HA_HOST:8123"
         proxy_base = f"http://{base}{endpoint}"
 
         curl_sample = (

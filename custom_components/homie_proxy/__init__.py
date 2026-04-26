@@ -20,7 +20,8 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import DOMAIN, DEFAULT_TIMEOUT
-from .proxy import HomieProxyService
+from .config_flow import _load_entry_data
+from .proxy import HomieProxyService, close_shared_session
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ PLATFORMS: list[Platform] = []
 # Configuration schema for YAML setup
 CONFIG_SCHEMA = vol.Schema({
     DOMAIN: vol.Schema({
-        vol.Optional("debug_requires_auth", default=False): bool,
+        vol.Optional("debug_requires_auth", default=True): bool,
     })
 }, extra=vol.ALLOW_EXTRA)
 
@@ -44,7 +45,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     
     # Read global configuration from YAML
     homie_config = config.get(DOMAIN, {})
-    debug_requires_auth = homie_config.get("debug_requires_auth", False)
+    debug_requires_auth = homie_config.get("debug_requires_auth", True)
     
     # Store global configuration
     hass.data[DOMAIN]["global_config"] = {
@@ -59,23 +60,25 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Homie Proxy from a config entry."""
     _LOGGER.info("Setting up Homie Proxy instance: %s", entry.data.get("name"))
-    
-    # Get configuration
-    name = entry.data.get("name")
-    tokens = entry.data.get("tokens", [])
-    restrict_out = entry.data.get("restrict_out")
-    restrict_in = entry.data.get("restrict_in")
-    requires_auth = entry.data.get("requires_auth", True)  # Default to secure
-    timeout = entry.data.get("timeout", DEFAULT_TIMEOUT)  # Per-instance timeout
-    
+
+    # Read entry through canonical loader (handles legacy field migration).
+    cfg = _load_entry_data(entry.data)
+    name = cfg["name"]
+    tokens = cfg["tokens"]
+    restrict_out = cfg["restrict_out"]
+    restrict_out_cidrs = cfg["restrict_out_cidrs"]
+    restrict_in_cidrs = cfg["restrict_in_cidrs"]
+    requires_auth = cfg["requires_auth"]
+    timeout = cfg["timeout"]
+
     # Get global debug configuration
     global_config = hass.data[DOMAIN].get("global_config", {})
-    debug_requires_auth = global_config.get("debug_requires_auth", False)
-    
+    debug_requires_auth = global_config.get("debug_requires_auth", True)
+
     if not tokens:
         _LOGGER.error("No tokens configured for Homie Proxy instance '%s'", name)
         raise ConfigEntryNotReady("No tokens configured")
-    
+
     # Create proxy service
     try:
         proxy_service = HomieProxyService(
@@ -83,10 +86,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             name=name,
             tokens=tokens,
             restrict_out=restrict_out,
-            restrict_in=restrict_in,
+            restrict_out_cidrs=restrict_out_cidrs,
+            restrict_in_cidrs=restrict_in_cidrs,
             timeout=timeout,
             requires_auth=requires_auth,
-            debug_requires_auth=debug_requires_auth
+            debug_requires_auth=debug_requires_auth,
         )
         
         # Store service instance
@@ -113,53 +117,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Homie Proxy config entry."""
     _LOGGER.info("Unloading Homie Proxy instance: %s", entry.data.get("name"))
-    
+
     # Get service instance
     instance_data = hass.data[DOMAIN].get(entry.entry_id)
     if instance_data:
         proxy_service = instance_data["service"]
         await proxy_service.cleanup()
-        
+
         # Remove from domain data
         hass.data[DOMAIN].pop(entry.entry_id, None)
-    
+
+    # If this was the last proxy instance, close the shared keep-alive pool.
+    remaining_instances = [
+        k for k in hass.data.get(DOMAIN, {}).keys()
+        if k not in ("global_config",)
+    ]
+    if not remaining_instances:
+        await close_shared_session()
+
     return True
 
 
 async def async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle configuration updates."""
     _LOGGER.info("Updating Homie Proxy instance: %s", entry.data.get("name"))
-    
-    # Get service instance
+
     instance_data = hass.data[DOMAIN].get(entry.entry_id)
     if not instance_data:
         _LOGGER.error("No service instance found for entry %s", entry.entry_id)
         return
-    
+
     proxy_service = instance_data["service"]
-    
-    # Get updated configuration
-    tokens = entry.data.get("tokens", [])
-    restrict_out = entry.data.get("restrict_out")
-    restrict_in = entry.data.get("restrict_in")
-    requires_auth = entry.data.get("requires_auth", True)  # Default to secure
-    timeout = entry.data.get("timeout", DEFAULT_TIMEOUT)  # Per-instance timeout
-    
-    # Get global debug configuration
+
+    cfg = _load_entry_data(entry.data)
     global_config = hass.data[DOMAIN].get("global_config", {})
-    debug_requires_auth = global_config.get("debug_requires_auth", False)
-    
-    # Update the service
+    debug_requires_auth = global_config.get("debug_requires_auth", True)
+
     await proxy_service.update(
-        tokens=tokens,
-        restrict_out=restrict_out,
-        restrict_in=restrict_in,
-        timeout=timeout,
-        requires_auth=requires_auth,
-        debug_requires_auth=debug_requires_auth
+        tokens=cfg["tokens"],
+        restrict_out=cfg["restrict_out"],
+        restrict_out_cidrs=cfg["restrict_out_cidrs"],
+        restrict_in_cidrs=cfg["restrict_in_cidrs"],
+        timeout=cfg["timeout"],
+        requires_auth=cfg["requires_auth"],
+        debug_requires_auth=debug_requires_auth,
     )
-    
-    # Update stored config
+
     instance_data["config"] = entry.data
 
 

@@ -58,4 +58,4 @@ logger:
 
 # HomieProxy configuration
 homie_proxy:
-  debug_requires_auth: false  # Allow debug endpoint without HA authentication 
+  debug_requires_auth: true  # Require HA authentication on debug endpoint (contains token data)

@@ -25,5 +25,23 @@ RESTRICT_OPTIONS = [
     ("custom", "Custom cidr"),
 ]
 
-# Default CIDR ranges
-PRIVATE_CIDRS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] 
+# Private / reserved CIDR ranges used by restrict_out=external|internal.
+# Keep this list complete — gaps are SSRF vectors.
+PRIVATE_CIDRS = [
+    # IPv4 RFC 1918
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    # IPv4 loopback — blocks proxying to 127.0.0.1 (i.e. HA itself)
+    "127.0.0.0/8",
+    # IPv4 link-local — blocks AWS/GCP/Azure metadata endpoints (169.254.169.254)
+    "169.254.0.0/16",
+    # IPv4 CGNAT (RFC 6598)
+    "100.64.0.0/10",
+    # IPv6 loopback
+    "::1/128",
+    # IPv6 link-local
+    "fe80::/10",
+    # IPv6 Unique Local (RFC 4193)
+    "fc00::/7",
+]

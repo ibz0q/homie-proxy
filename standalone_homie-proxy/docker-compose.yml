@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   homie-proxy-standalone:
     build: .
     container_name: homie-proxy-standalone
     ports:
-      - "8080:8080"
+      - "8181:8080"
     volumes:
       - ./proxy_config.json:/app/proxy_config.json:ro
     environment:
@@ -20,6 +18,19 @@ services:
     networks:
       - homie-proxy-network
 
+  ptz-ui:
+    image: python:3.11-alpine
+    container_name: ptz-ui
+    ports:
+      - "8182:8000"
+    working_dir: /srv
+    volumes:
+      - ../../:/srv:ro
+    command: ["python", "-m", "http.server", "8000"]
+    restart: unless-stopped
+    networks:
+      - homie-proxy-network
+
 networks:
   homie-proxy-network:
-    driver: bridge 
+    driver: bridge

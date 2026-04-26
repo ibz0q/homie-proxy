@@ -1,35 +1,9 @@
 {
   "instances": {
-    "restricted-out": {
-      "restrict_out": "both",
-      "restrict_out_cidrs": ["1.1.1.1/32"],
+    "ptz": {
+      "restrict_out": "any",
       "tokens": [
-        "your-secret-token-here"
-      ],
-      "restrict_in_cidrs": []
-    },
-    "external-only": {
-      "restrict_out": "external",
-      "tokens": [
-        "external-token-123"
-      ],
-      "restrict_in_cidrs": ["192.168.1.0/24", "10.0.0.0/8"]
-    },
-    "internal-only": {
-      "restrict_out": "internal",
-      "tokens": [],
-      "restrict_in_cidrs": []
-    },
-    "custom-networks": {
-      "restrict_out": "both",
-      "restrict_out_cidrs": ["8.8.8.0/24", "1.1.1.0/24", "192.168.0.0/16"],
-      "tokens": ["custom-token"],
-      "restrict_in_cidrs": []
-    },
-    "default": {
-      "restrict_out": "both",
-      "tokens": [
-        "your-secret-token-here"
+        "ptz-local-token"
       ],
       "restrict_in_cidrs": []
     }

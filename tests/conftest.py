@@ -18,9 +18,8 @@ from aiohttp import web
 # ambiguity.
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_TESTS_DIR)               # homie-proxy/
-_REPO_ROOT = os.path.dirname(_ROOT)               # repo root (contains custom_components/)
-_HA_COMPONENTS = os.path.join(_REPO_ROOT, "custom_components")
+_ROOT = os.path.dirname(_TESTS_DIR)               # homie-proxy/  (subrepo root)
+_HA_COMPONENTS = os.path.join(_ROOT, "custom_components")
 _STANDALONE = os.path.join(_ROOT, "standalone_homie-proxy")
 _STUBS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stubs")
 

@@ -1,0 +1,76 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add HomieProxy instance",
+        "description": "Create a new HTTP proxy endpoint. An initial access token will be generated automatically — you can manage tokens later via the integration's Configure dialog.",
+        "data": {
+          "name": "Endpoint name",
+          "restrict_out": "Outbound network restrictions",
+          "restrict_out_cidrs": "Custom outbound CIDRs (one per line, only used when 'Custom CIDR list' is selected)",
+          "restrict_in_cidrs": "Inbound IP CIDR allow-list (one per line, blank = allow any)",
+          "requires_auth": "Require Home Assistant authentication on top of the token",
+          "timeout": "Request timeout (seconds)"
+        }
+      }
+    },
+    "error": {
+      "invalid_name": "Name must be at least 2 characters",
+      "invalid_cidr": "One or more CIDR entries are invalid",
+      "custom_requires_cidrs": "Custom mode requires at least one CIDR",
+      "already_configured": "An endpoint with this name already exists",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "An endpoint with this name already exists"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure HomieProxy",
+        "description": "Pick a section to edit. Changes apply immediately when you save each step.",
+        "menu_options": {
+          "tokens": "Manage access tokens",
+          "restrictions": "Network restrictions",
+          "settings": "Auth & timeout",
+          "info": "Show endpoint info"
+        }
+      },
+      "tokens": {
+        "title": "Manage access tokens",
+        "description": "Currently {count} token(s). Edit the list (one per line) or pick an action below. Choosing an action other than 'Save changes' will append/replace tokens — pick 'Save changes' afterward to persist the result.",
+        "data": {
+          "tokens_text": "Tokens (one per line)",
+          "action": "Action"
+        }
+      },
+      "restrictions": {
+        "title": "Network restrictions",
+        "description": "Outbound mode controls which target URLs the proxy will call. 'Custom CIDR list' uses the outbound CIDRs below; the other modes ignore that field. Inbound CIDRs limit which client IPs may reach this endpoint (blank = any).",
+        "data": {
+          "restrict_out": "Outbound mode",
+          "restrict_out_cidrs": "Outbound CIDRs (one per line)",
+          "restrict_in_cidrs": "Inbound CIDRs (one per line)"
+        }
+      },
+      "settings": {
+        "title": "Auth & timeout",
+        "data": {
+          "requires_auth": "Require Home Assistant authentication on top of the token",
+          "timeout": "Request timeout (seconds)"
+        }
+      },
+      "info": {
+        "title": "Endpoint info",
+        "description": "**Name:** {name}\n**Endpoint URL:** `{endpoint}`\n**Tokens configured:** {token_count}\n**Outbound mode:** {restrict_out}\n**Outbound CIDRs:** {restrict_out_cidrs}\n**Inbound CIDRs:** {restrict_in_cidrs}\n**Requires HA auth:** {requires_auth}\n**Timeout:** {timeout}s\n\n---\n\n**cURL**\n```\n{curl_sample}\n```\n\n**JavaScript (fetch)**\n```javascript\n{js_sample}\n```\n\n---\n\n**Debug endpoint** (requires HA login): [{debug_endpoint}]({debug_endpoint})\n\nClick Submit to return to the menu."
+      }
+    },
+    "error": {
+      "invalid_cidr": "One or more CIDR entries are invalid",
+      "custom_requires_cidrs": "Custom mode requires at least one CIDR",
+      "tokens_empty": "At least one token is required",
+      "unknown": "Unexpected error"
+    }
+  }
+}

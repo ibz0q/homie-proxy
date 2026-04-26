@@ -271,7 +271,49 @@ class OptionsFlow(config_entries.OptionsFlow):
     ) -> config_entries.ConfigFlowResult:
         return self.async_show_menu(
             step_id="init",
-            menu_options=["tokens", "restrictions", "settings", "info"],
+            menu_options=["rename", "tokens", "restrictions", "settings", "info"],
+        )
+
+    # ── Rename ───────────────────────────────────────────────────────────────
+
+    async def async_step_rename(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> config_entries.ConfigFlowResult:
+        """Let the user change the endpoint name (the URL path segment)."""
+        errors: Dict[str, str] = {}
+        data = self._data()
+
+        if user_input is not None:
+            new_name = (user_input.get("name") or "").strip()
+
+            if len(new_name) < 2:
+                errors["name"] = "invalid_name"
+            elif new_name != data["name"] and any(
+                e.data.get("name") == new_name
+                for e in self.hass.config_entries.async_entries(DOMAIN)
+                if e.entry_id != self.config_entry.entry_id
+            ):
+                errors["name"] = "already_configured"
+
+            if not errors:
+                self._persist({"name": new_name})
+                # Update the integration title shown in the UI.
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    title=f"HomieProxy — {new_name}",
+                )
+                await self._reload()
+                return await self.async_step_init()
+
+        schema = vol.Schema({
+            vol.Required("name", default=user_input.get("name") if user_input else data["name"]): str,
+        })
+
+        return self.async_show_form(
+            step_id="rename",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"current_name": data["name"]},
         )
 
     # ── Tokens ───────────────────────────────────────────────────────────────
@@ -415,23 +457,57 @@ class OptionsFlow(config_entries.OptionsFlow):
         first_token = data["tokens"][0] if data["tokens"] else "(no tokens)"
         endpoint = f"/api/homie_proxy/{data['name']}"
 
-        base = "[IP:PORT]"
+        base = "<ha-host>:8123"
+        proxy_base = f"http://{base}{endpoint}"
 
         curl_sample = (
-            f"curl -G 'http://{base}{endpoint}' "
-            f"--data-urlencode 'token={first_token}' "
-            f"--data-urlencode 'url=https://httpbin.org/get'"
+            f"curl -G '{proxy_base}' \\\n"
+            f"  --data-urlencode 'token={first_token}' \\\n"
+            f"  --data-urlencode 'url=https://httpbin.org/get'"
+        )
+
+        post_sample = (
+            f"curl -X POST '{proxy_base}' \\\n"
+            f"  --data-urlencode 'token={first_token}' \\\n"
+            f"  --data-urlencode 'url=http://192.168.1.50/api/preset' \\\n"
+            f"  -H 'Content-Type: application/json' \\\n"
+            f"  -d '{{\"preset\": 1}}'"
+        )
+
+        auth_sample = (
+            f"curl -G '{proxy_base}' \\\n"
+            f"  --data-urlencode 'token={first_token}' \\\n"
+            f"  --data-urlencode 'url=https://api.example.com/data' \\\n"
+            f"  --data-urlencode 'request_header[Authorization]=Bearer upstream-secret' \\\n"
+            f"  --data-urlencode 'response_header[Access-Control-Allow-Origin]=*'"
+        )
+
+        preflight_sample = (
+            f"curl -X OPTIONS -G '{proxy_base}' \\\n"
+            f"  --data-urlencode 'token={first_token}' \\\n"
+            f"  --data-urlencode 'url=http://192.168.1.50/api' \\\n"
+            f"  --data-urlencode 'cors_preflight=1' \\\n"
+            f"  --data-urlencode 'response_header[Access-Control-Allow-Origin]=*' \\\n"
+            f"  --data-urlencode 'response_header[Access-Control-Allow-Methods]=GET, POST, PUT' \\\n"
+            f"  --data-urlencode 'response_header[Access-Control-Allow-Headers]=Content-Type'"
+        )
+
+        tls_sample = (
+            f"curl -G '{proxy_base}' \\\n"
+            f"  --data-urlencode 'token={first_token}' \\\n"
+            f"  --data-urlencode 'url=https://192.168.1.50/api' \\\n"
+            f"  --data-urlencode 'skip_tls_checks=all'"
         )
 
         js_sample = (
-            f"const resp = await fetch(\n"
-            f"  'http://{base}{endpoint}?' + new URLSearchParams({{\n"
-            f"    token: '{first_token}',\n"
-            f"    url: 'https://httpbin.org/get',\n"
-            f"  }})\n"
-            f");\n"
-            f"const data = await resp.json();\n"
-            f"console.log(data); // echoes request details"
+            f"const params = new URLSearchParams({{\n"
+            f"  token: '{first_token}',\n"
+            f"  url:   'http://192.168.1.50/api/status',\n"
+            f"  'request_header[Authorization]': 'Basic ' + btoa('user:pass'),\n"
+            f"  'response_header[Access-Control-Allow-Origin]': '*',\n"
+            f"}});\n"
+            f"const resp = await fetch(`{proxy_base}?${{params}}`);\n"
+            f"const data = await resp.json();"
         )
 
         return self.async_show_form(
@@ -448,6 +524,10 @@ class OptionsFlow(config_entries.OptionsFlow):
                 "requires_auth": "yes" if data["requires_auth"] else "no",
                 "timeout": str(data["timeout"]),
                 "curl_sample": curl_sample,
+                "post_sample": post_sample,
+                "auth_sample": auth_sample,
+                "preflight_sample": preflight_sample,
+                "tls_sample": tls_sample,
                 "js_sample": js_sample,
                 "debug_endpoint": f"http://{base}/api/homie_proxy/debug",
             },

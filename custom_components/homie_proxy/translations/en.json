@@ -31,10 +31,18 @@
         "title": "Configure HomieProxy",
         "description": "Pick a section to edit. Changes apply immediately when you save each step.",
         "menu_options": {
+          "rename": "Rename endpoint",
           "tokens": "Manage access tokens",
           "restrictions": "Network restrictions",
           "settings": "Auth & timeout",
-          "info": "Show endpoint info"
+          "info": "Endpoint info (with help + examples)"
+        }
+      },
+      "rename": {
+        "title": "Rename endpoint",
+        "description": "Current name: **{current_name}**\n\nThe name is the URL path segment: `/api/homie_proxy/<name>`. Changing it immediately updates the endpoint URL — update any clients that reference the old name.",
+        "data": {
+          "name": "New endpoint name"
         }
       },
       "tokens": {
@@ -62,11 +70,13 @@
         }
       },
       "info": {
-        "title": "Endpoint info",
-        "description": "**Name:** {name}\n**Endpoint URL:** `{endpoint}`\n**Tokens configured:** {token_count}\n**Outbound mode:** {restrict_out}\n**Outbound CIDRs:** {restrict_out_cidrs}\n**Inbound CIDRs:** {restrict_in_cidrs}\n**Requires HA auth:** {requires_auth}\n**Timeout:** {timeout}s\n\n---\n\n**cURL**\n```\n{curl_sample}\n```\n\n**JavaScript (fetch)**\n```javascript\n{js_sample}\n```\n\n---\n\n**Debug endpoint** (requires HA login): [{debug_endpoint}]({debug_endpoint})\n\nClick Submit to return to the menu."
+        "title": "Endpoint info (with help + examples)",
+        "description": "## This endpoint\n\n| | |\n|---|---|\n| **Name** | `{name}` |\n| **Path** | `{endpoint}` |\n| **Tokens** | {token_count} configured |\n| **Outbound mode** | `{restrict_out}` |\n| **Outbound CIDRs** | {restrict_out_cidrs} |\n| **Inbound CIDRs** | {restrict_in_cidrs} |\n| **Requires HA auth** | {requires_auth} |\n| **Timeout** | {timeout}s |\n\n---\n\n## URL pattern\n\n```\nhttp://<ha-host>:8123{endpoint}?token=<TOKEN>&url=<TARGET_URL>\n```\n\n## Parameters\n\n| Parameter | Description |\n|---|---|\n| `token` *(req)* | One of the configured access tokens |\n| `url` *(req)* | Full target URL to proxy (e.g. `http://192.168.1.50/api`) |\n| `timeout` | Per-request timeout override in seconds |\n| `follow_redirects` | Set `true` to follow 3xx (default: pass back) |\n| `skip_tls_checks` | Comma list: `all` · `self_signed` · `expired_cert` · `hostname_mismatch` · `cert_authority` |\n| `cors_preflight` | `1` short-circuits `OPTIONS` with 204 |\n| `request_header[X]` | Inject header *X* into the upstream request |\n| `response_header[X]` | Attach header *X* to the response |\n\n> Brackets must be percent-encoded in URLs: `[` → `%5B`, `]` → `%5D`. `URLSearchParams` handles this for you.\n\n---\n\n## Examples\n\n**Basic GET (cURL):**\n```\n{curl_sample}\n```\n\n**POST with JSON body:**\n```\n{post_sample}\n```\n\n**Inject upstream auth + add CORS to response:**\n```\n{auth_sample}\n```\n\n**CORS preflight short-circuit (OPTIONS → 204):**\n```\n{preflight_sample}\n```\n\n**Skip TLS checks (self-signed cameras):**\n```\n{tls_sample}\n```\n\n**JavaScript (fetch):**\n```javascript\n{js_sample}\n```\n\n---\n\n## Error codes\n\n| Code | Meaning |\n|---|---|\n| `400` | `url` missing or malformed |\n| `401` | Token missing or wrong |\n| `403` | Client IP or target URL blocked by access control |\n| `502` | Upstream unreachable (DNS / connection refused) |\n| `504` | Upstream did not reply within the timeout |\n\n---\n\n**Debug endpoint** (requires HA login): [{debug_endpoint}]({debug_endpoint})\n\nClick Submit to return to the menu."
       }
     },
     "error": {
+      "invalid_name": "Name must be at least 2 characters",
+      "already_configured": "An endpoint with this name already exists",
       "invalid_cidr": "One or more CIDR entries are invalid",
       "custom_requires_cidrs": "Custom mode requires at least one CIDR",
       "tokens_empty": "At least one token is required",

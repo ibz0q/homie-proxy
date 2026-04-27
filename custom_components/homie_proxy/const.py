@@ -28,6 +28,9 @@ RESTRICT_OPTIONS = [
 # Private / reserved CIDR ranges used by restrict_out=external|internal.
 # Keep this list complete — gaps are SSRF vectors.
 PRIVATE_CIDRS = [
+    # IPv4 "this network" (RFC 1122). On Linux a connect() to 0.0.0.0 is
+    # routed to 127.0.0.1, so this MUST be blocked alongside 127/8.
+    "0.0.0.0/8",
     # IPv4 RFC 1918
     "10.0.0.0/8",
     "172.16.0.0/12",
@@ -38,6 +41,8 @@ PRIVATE_CIDRS = [
     "169.254.0.0/16",
     # IPv4 CGNAT (RFC 6598)
     "100.64.0.0/10",
+    # IPv6 unspecified
+    "::/128",
     # IPv6 loopback
     "::1/128",
     # IPv6 link-local

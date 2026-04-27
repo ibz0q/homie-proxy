@@ -1,0 +1,109 @@
+name: Release
+
+# Cuts a GitHub Release whenever a `v*` tag is pushed — but only after the
+# full test suite (including the security tests) passes on the same commit.
+# HACS picks up the release automatically; users see the new version in
+# their HACS UI within ~30 minutes.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write     # needed to create the release
+
+jobs:
+  # Re-run the full test suite on the tagged commit. The `test.yml` workflow
+  # only fires on push-to-main / PRs, not on tag pushes — so we explicitly
+  # gate the release behind a green run here. If you skip this, you can
+  # accidentally publish a release from a commit that never went through CI
+  # (e.g. tagged a commit on a hotfix branch).
+  verify:
+    name: Verify tests pass
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio pytest-aiohttp aiohttp
+      - run: pytest tests/ -v -ra
+
+  release:
+    name: Create GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history so we can generate a changelog from previous tag.
+          fetch-depth: 0
+
+      - name: Extract tag version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Strip the leading 'v' if present so manifest can compare cleanly.
+          VERSION="${TAG#v}"
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify manifest.json version matches tag
+        run: |
+          python -c "
+          import json, sys, os
+          m = json.load(open('custom_components/homie_proxy/manifest.json'))
+          tag_ver  = os.environ['VERSION']
+          mani_ver = m.get('version', '')
+          if mani_ver != tag_ver:
+              print(f'manifest.json version ({mani_ver!r}) does not match tag ({tag_ver!r})')
+              sys.exit(1)
+          print(f'OK: manifest.json version {mani_ver} matches tag v{tag_ver}')
+          "
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+
+      - name: Generate changelog from commits since previous tag
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${GITHUB_REF#refs/tags/}$" | head -1 || true)
+          if [ -z "$PREV_TAG" ]; then
+            echo "no previous tag — using full commit log"
+            LOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            echo "diff since $PREV_TAG"
+            LOG=$(git log --pretty=format:"- %s (%h)" --no-merges "${PREV_TAG}..HEAD")
+          fi
+          {
+            echo "body<<EOF"
+            echo "## Changes"
+            echo ""
+            echo "$LOG"
+            echo ""
+            echo "## Install / update via HACS"
+            echo ""
+            echo "1. HACS → Integrations → HomieProxy → Update"
+            echo "2. Restart Home Assistant"
+            echo ""
+            echo "_Built and tested on Python 3.11, 3.12, 3.13._"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          body: ${{ steps.changelog.outputs.body }}
+          # Mark drafts/prereleases via tag: v1.2.3-rc1 → prerelease automatically
+          prerelease: ${{ contains(steps.ver.outputs.tag, '-') }}
+          # HACS reads custom_components/<domain>/ from the repo's source
+          # archive, so we don't need to attach a separate zip.
+          generate_release_notes: false

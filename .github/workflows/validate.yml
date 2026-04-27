@@ -1,0 +1,38 @@
+name: Validate (HACS + hassfest)
+
+# Runs HACS's own validation action and Home Assistant's `hassfest` on every
+# push / PR — these catch metadata / manifest mistakes (missing fields,
+# wrong domain, invalid iot_class, etc.) BEFORE a release is cut.
+#
+# Both actions are official and maintained by their respective projects.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    # Weekly run catches drift when HACS / hassfest add new validation rules
+    # without an explicit code change here.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hacs:
+    name: HACS validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: HACS action
+        uses: hacs/action@main
+        with:
+          category: integration
+
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master

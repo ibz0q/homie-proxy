@@ -97,3 +97,27 @@ def make_upstream_app() -> web.Application:
 async def upstream(aiohttp_server):
     """A running mock upstream server."""
     return await aiohttp_server(make_upstream_app())
+
+
+# ─── DNS-cache hygiene ────────────────────────────────────────────────────────
+#
+# Both proxy modules cache DNS results process-wide for DNS_CACHE_TTL seconds
+# (perf opt — see _resolve_cached). Tests that monkey-patch getaddrinfo (e.g.
+# the multi-A-record test) would otherwise see stale entries from earlier
+# tests. Auto-clear before every test.
+
+@pytest.fixture(autouse=True)
+def _clear_dns_caches():
+    """Clear both modules' DNS caches before each test."""
+    # HA component — may not be importable in standalone-only contexts.
+    try:
+        from homie_proxy.proxy import _dns_cache_clear as _clear_ha
+        _clear_ha()
+    except ImportError:
+        pass
+    # Standalone module — load lazily via conftest helper to avoid double-import.
+    try:
+        load_standalone()._dns_cache_clear()
+    except Exception:
+        pass
+    yield

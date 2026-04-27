@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import ipaddress
 import json
 import logging
+import re
 import socket
 import ssl
+import time
 import urllib.parse
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from aiohttp import web
@@ -35,6 +38,95 @@ _HOP_BY_HOP_WS = frozenset({
     "sec-websocket-protocol", "sec-websocket-extensions", "host",
 })
 
+# Max number of redirects to follow when `follow_redirects=true` is supplied.
+# Each hop is re-validated against the outbound policy.
+MAX_REDIRECT_HOPS = 5
+
+# Streaming chunk size — 64 KB strikes a balance between throughput and
+# memory. With 8 KB the event loop wakes up ~8× more often per Mbit/s of
+# stream; for 5 Mbps MJPEG that's ~75 saved wakeups per second.
+STREAM_CHUNK_SIZE = 64 * 1024
+
+# Per-process DNS cache for outbound-policy checks. Entries expire after
+# DNS_CACHE_TTL seconds; the bound is also the worst-case window during
+# which a DNS-rebinding attacker could keep us pointed at a stale answer
+# while the attacker's authoritative server flips records.
+#
+# IMPORTANT: this cache is for the POLICY check only. aiohttp's connector
+# does its own DNS resolution at connect-time; if the two disagree,
+# aiohttp's resolution wins for the actual TCP connect. That residual
+# TOCTOU is documented in test_security.test_dns_rebinding_*.
+DNS_CACHE_TTL = 30.0
+_DNS_CACHE: Dict[str, Tuple[float, List[str]]] = {}
+
+
+async def _resolve_cached(hostname: str) -> Optional[List[str]]:
+    """Resolve *hostname* to a list of IP-literal strings, with TTL caching.
+
+    Returns None on resolution failure (so the caller fails closed).
+    Negative results are NOT cached — a transient DNS failure shouldn't
+    keep an endpoint dark for 30 seconds.
+    """
+    now = time.monotonic()
+    entry = _DNS_CACHE.get(hostname)
+    if entry is not None:
+        ts, addrs = entry
+        if now - ts < DNS_CACHE_TTL:
+            return addrs
+
+    loop = asyncio.get_running_loop()
+    try:
+        info = await loop.getaddrinfo(
+            hostname, None, type=socket.SOCK_STREAM,
+        )
+    except OSError:
+        return None
+    if not info:
+        return None
+
+    addrs: List[str] = []
+    for entry_t in info:
+        try:
+            addrs.append(entry_t[4][0])
+        except (IndexError, TypeError):
+            return None
+    if not addrs:
+        return None
+
+    _DNS_CACHE[hostname] = (now, addrs)
+    return addrs
+
+
+def _dns_cache_clear() -> None:
+    """Test hook — clear the DNS cache between tests so monkey-patched
+    getaddrinfo isn't shadowed by stale entries from a previous test."""
+    _DNS_CACHE.clear()
+
+
+# ─── Helpers: log redaction & token masking ──────────────────────────────────
+
+# Redact `token=...`, `password=...`, `secret=...` (case-insensitive) so
+# logged URLs never leak credentials.
+_REDACT_QS_RE = re.compile(
+    r"(?i)(?P<key>token|password|secret|api[_-]?key)=[^&\s]*"
+)
+
+
+def _redact_url(url: str) -> str:
+    """Strip well-known credential query parameters from a URL for logging."""
+    if not url:
+        return url
+    return _REDACT_QS_RE.sub(r"\g<key>=***", url)
+
+
+def _mask_token(token: str) -> str:
+    """Return a partially-redacted token for /debug — first 4 chars + ***."""
+    if not token:
+        return "***"
+    if len(token) <= 4:
+        return "***"
+    return f"{token[:4]}***"
+
 
 # ─── Session pool ─────────────────────────────────────────────────────────────
 
@@ -53,6 +145,14 @@ async def get_shared_session() -> aiohttp.ClientSession:
                 limit_per_host=16,
                 keepalive_timeout=60,
                 enable_cleanup_closed=True,
+                # aiohttp's own connect-time DNS cache. Complements our
+                # policy-check cache in _resolve_cached(): we resolve once
+                # for the policy, aiohttp resolves once for the connect,
+                # both reuse their cache for the next request to the same
+                # host. ttl_dns_cache matches DNS_CACHE_TTL so the two
+                # caches expire on the same schedule.
+                use_dns_cache=True,
+                ttl_dns_cache=int(DNS_CACHE_TTL),
             )
         )
     return _shared_session
@@ -62,7 +162,11 @@ async def _get_ssl_session(key: str, ctx: ssl.SSLContext) -> aiohttp.ClientSessi
     """Return a cached session that uses *ctx* for all connections."""
     if key not in _ssl_sessions or _ssl_sessions[key].closed:
         _ssl_sessions[key] = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=ctx)
+            connector=aiohttp.TCPConnector(
+                ssl=ctx,
+                use_dns_cache=True,
+                ttl_dns_cache=int(DNS_CACHE_TTL),
+            )
         )
     return _ssl_sessions[key]
 
@@ -148,10 +252,14 @@ class ProxyInstance:
         restrict_out_cidrs: Optional[List[str]] = None,
         restrict_in_cidrs: Optional[List[str]] = None,
         timeout: int = 300,
-        restrict_in: Optional[str] = None,  # legacy single-CIDR shim
+        restrict_in: Optional[str] = None,      # legacy single-CIDR shim
     ) -> None:
         self.name = name
-        self.tokens = set(tokens)
+        # `tokens` kept as list (constant-time compare); `_token_bytes` are the
+        # bytes used by hmac.compare_digest. Stored separately so we don't
+        # encode on every request.
+        self.tokens = list(tokens)
+        self._token_bytes = [t.encode("utf-8") for t in self.tokens]
         self.timeout = timeout
 
         if restrict_out not in ("any", "external", "internal", "custom"):
@@ -193,42 +301,103 @@ class ProxyInstance:
         except ValueError:
             return False
 
-    async def is_target_allowed(self, target_url: str) -> bool:
+    # Defence-in-depth: only these URL schemes are forwarded. Anything else
+    # (file://, gopher://, ftp://, ldap://, dict://, data:, javascript:, …)
+    # is rejected up-front so it can never reach the upstream session.
+    _ALLOWED_SCHEMES = frozenset({"http", "https", "ws", "wss"})
+
+    def _check_ip(self, target_ip: ipaddress._BaseAddress) -> bool:
+        """Apply the configured outbound policy to a single resolved address."""
+        if self.restrict_out == "custom":
+            return any(target_ip in cidr for cidr in self.restrict_out_cidrs)
+        if self.restrict_out == "external":
+            return not any(target_ip in net for net in _PRIVATE_NETWORKS)
+        if self.restrict_out == "internal":
+            return any(target_ip in net for net in _PRIVATE_NETWORKS)
+        return True  # "any"
+
+    async def is_target_allowed(
+        self,
+        target_url: str,
+        *,
+        _parsed: Optional[urllib.parse.ParseResult] = None,
+    ) -> bool:
         """Return True if the target URL passes outbound restrictions.
 
-        DNS resolution uses the event loop's async getaddrinfo so the
-        HA event loop is never blocked by a synchronous syscall.
+        DNS resolution uses the event loop's async getaddrinfo so the HA
+        event loop is never blocked by a synchronous syscall. When a hostname
+        resolves to multiple addresses, EVERY address must satisfy the policy
+        — otherwise a multi-A-record / DNS-rebinding attacker could pass the
+        check (public IP) and then aiohttp would connect to a different
+        resolved address (private IP).
+
+        ``_parsed`` lets the caller (``HomieProxyView._handle``) avoid
+        re-parsing the same URL twice per request — pass the
+        ``urllib.parse.urlparse(target_url)`` result here and we skip the
+        second parse. Public callers (and tests) use the simple
+        ``is_target_allowed(url)`` form.
+
+        DNS results are cached for ``DNS_CACHE_TTL`` seconds; see
+        ``_resolve_cached``.
         """
         try:
-            hostname = urllib.parse.urlparse(target_url).hostname
+            parsed = _parsed if _parsed is not None else urllib.parse.urlparse(target_url)
+            scheme = (parsed.scheme or "").lower()
+            if scheme not in self._ALLOWED_SCHEMES:
+                _LOGGER.debug("Rejecting unsupported URL scheme: %r", scheme)
+                return False
+
+            hostname = parsed.hostname
             if not hostname:
                 return False
 
             try:
                 target_ip = ipaddress.ip_address(hostname)  # already an IP literal
+                return self._check_ip(target_ip)
             except ValueError:
-                # Hostname — resolve without blocking the event loop.
-                loop = asyncio.get_running_loop()
-                try:
-                    info = await loop.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-                    target_ip = ipaddress.ip_address(info[0][4][0])
-                except (OSError, IndexError, ValueError):
-                    _LOGGER.debug("DNS resolution failed for '%s'; denying", hostname)
-                    return False
+                pass  # not an IP literal — fall through to DNS
 
-            if self.restrict_out == "custom":
-                return any(target_ip in cidr for cidr in self.restrict_out_cidrs)
-            if self.restrict_out == "external":
-                return not any(target_ip in net for net in _PRIVATE_NETWORKS)
-            if self.restrict_out == "internal":
-                return any(target_ip in net for net in _PRIVATE_NETWORKS)
-            return True  # "any"
+            # Hostname — resolve via the cached resolver. The cache is
+            # process-wide and TTL-bounded so we don't re-syscall for every
+            # request to the same upstream host.
+            addrs = await _resolve_cached(hostname)
+            if addrs is None:
+                _LOGGER.debug("DNS resolution failed for '%s'; denying", hostname)
+                return False
+
+            for s in addrs:
+                try:
+                    addr = ipaddress.ip_address(s)
+                except ValueError:
+                    return False
+                if not self._check_ip(addr):
+                    _LOGGER.debug(
+                        "Rejecting %s — resolved address %s fails policy",
+                        hostname, addr,
+                    )
+                    return False
+            return True
 
         except Exception:
             return False
 
     def is_token_valid(self, token: Optional[str]) -> bool:
-        return bool(token) and bool(self.tokens) and token in self.tokens
+        """Constant-time token check. `token in self.tokens` short-circuits on
+        first byte mismatch and is theoretically vulnerable to timing attacks
+        — `hmac.compare_digest` is constant-time for equal-length strings."""
+        if not token or not self._token_bytes:
+            return False
+        try:
+            given = token.encode("utf-8")
+        except (UnicodeEncodeError, AttributeError):
+            return False
+        # Iterate ALL configured tokens (no short-circuit) so the time taken
+        # to reject a wrong token is independent of which slot would match.
+        result = False
+        for tb in self._token_bytes:
+            if hmac.compare_digest(given, tb):
+                result = True
+        return result
 
 
 # ─── HTTP view ────────────────────────────────────────────────────────────────
@@ -337,6 +506,7 @@ class HomieProxyView(HomeAssistantView):
         try:
             qp = self._normalise_qp(dict(request.query))
             client_ip = self._client_ip(request)
+            inst_name = self.proxy_instance.name
 
             # ── CORS preflight short-circuit (opt-in via ?cors_preflight=1) ──
             if method == "OPTIONS":
@@ -351,12 +521,23 @@ class HomieProxyView(HomeAssistantView):
             # ── Token auth first — prevents leaking access-control info ──────
             token = (qp.get("token") or [""])[0]
             if not self.proxy_instance.is_token_valid(token):
-                _LOGGER.debug("Auth failed on '%s'", self.proxy_instance.name)
+                # WARNING: a 401 here is the canonical signal of a brute-force
+                # attempt or a leaked token being probed. Log enough to triage.
+                _LOGGER.warning(
+                    "homie_proxy/%s: 401 auth failed (client_ip=%s, "
+                    "token_prefix=%r, ua=%r) — possible brute force / leaked token",
+                    inst_name, client_ip, _mask_token(token),
+                    request.headers.get("User-Agent", "")[:64],
+                )
                 return self._error(401, "Invalid or missing authentication token", qp)
 
             # ── Inbound IP check ──────────────────────────────────────────────
             if not self.proxy_instance.is_client_allowed(client_ip):
-                _LOGGER.debug("Inbound IP denied: %s → '%s'", client_ip, self.proxy_instance.name)
+                _LOGGER.warning(
+                    "homie_proxy/%s: 403 inbound IP rejected (client_ip=%s) — "
+                    "valid token used from non-allowlisted network",
+                    inst_name, client_ip,
+                )
                 return self._error(403, "Access denied from your IP", qp)
 
             # ── Target URL ────────────────────────────────────────────────────
@@ -364,15 +545,26 @@ class HomieProxyView(HomeAssistantView):
             if not target_url:
                 return self._error(400, "Target URL required", qp)
 
-            if not await self.proxy_instance.is_target_allowed(target_url):
-                _LOGGER.debug("Outbound URL denied: %s", target_url)
+            # Parse once, share with the policy check and the Host-header
+            # logic below. Avoids a redundant urlparse() on every request.
+            parsed_target = urllib.parse.urlparse(target_url)
+
+            if not await self.proxy_instance.is_target_allowed(
+                target_url, _parsed=parsed_target,
+            ):
+                _LOGGER.warning(
+                    "homie_proxy/%s: 403 outbound URL rejected (client_ip=%s, "
+                    "url=%s, mode=%s) — possible SSRF attempt",
+                    inst_name, client_ip, _redact_url(target_url),
+                    self.proxy_instance.restrict_out,
+                )
                 return self._error(403, "Access denied to the target URL", qp)
 
-            _LOGGER.debug("%s %s → %s", method, self.proxy_instance.name, target_url)
+            _LOGGER.debug("%s %s → %s", method, inst_name, _redact_url(target_url))
 
             # ── Build upstream headers ────────────────────────────────────────
             headers = dict(request.headers)
-            host = urllib.parse.urlparse(target_url).hostname
+            host = parsed_target.hostname
 
             host_override: Optional[str] = None
             for key, values in qp.items():
@@ -422,13 +614,34 @@ class HomieProxyView(HomeAssistantView):
                 else aiohttp.ClientTimeout(total=timeout_secs)
             )
 
+            # ── Redirect handling ────────────────────────────────────────────
+            # When restrict_out is "any" we let aiohttp follow redirects
+            # natively (no policy concerns). When the user has any tighter
+            # mode, we MUST validate every redirect target — otherwise an
+            # open redirector at a public URL can bounce us to internal IPs.
+            #
+            # See _follow_with_revalidation. Streaming + redirect-following
+            # is rare; we don't combine them (caller can pre-resolve).
+            need_manual_redirects = (
+                follow
+                and not is_streaming
+                and self.proxy_instance.restrict_out != "any"
+            )
+
             # ── Outbound request (retry once on stale keep-alive) ─────────────
             req_kwargs: Dict[str, Any] = {
                 "method": method, "url": target_url,
-                "headers": headers, "allow_redirects": follow, "timeout": timeout,
+                "headers": headers,
+                "allow_redirects": (follow and not need_manual_redirects),
+                "timeout": timeout,
             }
             if body is not None:
                 req_kwargs["data"] = body
+
+            if need_manual_redirects:
+                return await self._follow_with_revalidation(
+                    session, req_kwargs, qp, client_ip, inst_name,
+                )
 
             attempts = 1 if is_streaming else 2
             last_err: Optional[Exception] = None
@@ -450,12 +663,12 @@ class HomieProxyView(HomeAssistantView):
                             )
                             await stream_resp.prepare(request)
                             total = 0
-                            async for chunk in resp.content.iter_chunked(8192):
+                            async for chunk in resp.content.iter_chunked(STREAM_CHUNK_SIZE):
                                 if chunk:
                                     await stream_resp.write(chunk)
                                     total += len(chunk)
                             await stream_resp.write_eof()
-                            _LOGGER.debug("Streamed %d bytes from %s", total, target_url)
+                            _LOGGER.debug("Streamed %d bytes from %s", total, _redact_url(target_url))
                             return stream_resp
 
                         data = await resp.read()
@@ -477,6 +690,91 @@ class HomieProxyView(HomeAssistantView):
         except Exception as exc:
             _LOGGER.error("Proxy error: %s", exc)
             return self._error(500, "Internal server error", qp)
+
+    # ── Manual redirect follower with policy re-validation ───────────────────
+
+    async def _follow_with_revalidation(
+        self,
+        session: aiohttp.ClientSession,
+        req_kwargs: Dict[str, Any],
+        qp: Dict[str, List[str]],
+        client_ip: str,
+        inst_name: str,
+    ) -> web.Response:
+        """Follow up to MAX_REDIRECT_HOPS redirects, re-validating each new
+        target against the outbound policy before issuing the next request.
+
+        Without this, an attacker who can plant a 302 at a public URL could
+        bounce the proxy to an internal IP (`restrict_out=external` would
+        check the public URL once and then aiohttp's auto-follow would chase
+        the redirect to the internal IP unchecked)."""
+        seen: set = set()
+        kwargs = dict(req_kwargs)
+        kwargs["allow_redirects"] = False
+
+        for hop in range(MAX_REDIRECT_HOPS + 1):
+            current_url = kwargs["url"]
+            if current_url in seen:
+                _LOGGER.warning(
+                    "homie_proxy/%s: redirect loop detected (client_ip=%s, "
+                    "url=%s)",
+                    inst_name, client_ip, _redact_url(current_url),
+                )
+                return self._error(508, "Redirect loop detected", qp)
+            seen.add(current_url)
+
+            async with session.request(**kwargs) as resp:
+                resp_headers: Dict[str, str] = {
+                    k: v for k, v in resp.headers.items()
+                    if k.lower() not in _HOP_BY_HOP_RESPONSE
+                }
+                for key, values in qp.items():
+                    if key.startswith("response_header[") and key.endswith("]"):
+                        resp_headers[key[16:-1]] = values[0]
+
+                # Not a redirect, or no Location header → return as-is.
+                if not (300 <= resp.status < 400):
+                    data = await resp.read()
+                    return web.Response(
+                        body=data, status=resp.status, headers=resp_headers,
+                    )
+                location = resp.headers.get("Location")
+                if not location:
+                    data = await resp.read()
+                    return web.Response(
+                        body=data, status=resp.status, headers=resp_headers,
+                    )
+
+                next_url = urllib.parse.urljoin(current_url, location)
+                if not await self.proxy_instance.is_target_allowed(next_url):
+                    _LOGGER.warning(
+                        "homie_proxy/%s: 403 redirect target rejected "
+                        "(client_ip=%s, from=%s, to=%s, mode=%s) — possible "
+                        "SSRF via open-redirect",
+                        inst_name, client_ip,
+                        _redact_url(current_url), _redact_url(next_url),
+                        self.proxy_instance.restrict_out,
+                    )
+                    return self._error(
+                        403, "Redirect target blocked by access policy", qp,
+                    )
+
+                kwargs = dict(kwargs)
+                kwargs["url"] = next_url
+                # Per RFC 7231 §6.4.3: 303 changes method to GET; for 301/302
+                # most user-agents also change POST→GET (we do the same).
+                if resp.status in (301, 302, 303) and kwargs.get("method") in (
+                    "POST", "PUT", "PATCH"
+                ):
+                    kwargs["method"] = "GET"
+                    kwargs.pop("data", None)
+
+        _LOGGER.warning(
+            "homie_proxy/%s: 508 redirect chain exceeded MAX_REDIRECT_HOPS (%d) "
+            "(client_ip=%s)",
+            inst_name, MAX_REDIRECT_HOPS, client_ip,
+        )
+        return self._error(508, "Too many redirects", qp)
 
     # ── WebSocket relay ───────────────────────────────────────────────────────
 
@@ -570,46 +868,83 @@ class HomieProxyDebugView(HomeAssistantView):
             )
 
     async def get(self, request: Request) -> web.Response:
-        domain_data = self.hass.data.get(DOMAIN, {})
-        instances = {
-            data["service"].name: data["service"]
-            for data in domain_data.values()
-            if isinstance(data, dict) and "service" in data
-        }
+        # Wrap everything so we can return a JSON error rather than the bare
+        # aiohttp 500 stub. Without this any malformed entry crashes the whole
+        # debug view and makes it look broken.
+        try:
+            # HomeAssistantView does NOT auto-populate `self.hass`. The
+            # canonical way to get hass from inside a view is via the request:
+            # `request.app["hass"]` — works regardless of auth state.
+            hass = request.app["hass"]
+            domain_data = hass.data.get(DOMAIN, {})
 
-        info: Dict[str, Any] = {
-            "timestamp": datetime.now().isoformat(),
-            "instances": {
-                name: {
-                    "name": svc.name,
-                    "tokens": list(svc.tokens),
-                    "restrict_out": svc.restrict_out,
-                    "restrict_out_cidrs": list(svc.restrict_out_cidrs),
-                    "restrict_in_cidrs": list(svc.restrict_in_cidrs),
-                    "timeout": svc.timeout,
-                    "requires_auth": svc.requires_auth,
-                    "endpoint_url": f"/api/homie_proxy/{svc.name}",
-                    "status": "active" if svc.view else "inactive",
-                }
-                for name, svc in instances.items()
-            },
-            "system": {
-                "private_cidrs": PRIVATE_CIDRS,
-                "available_restrictions": ["any", "external", "internal", "custom"],
-            },
-            "debug": {
-                "authentication_required": self.requires_auth,
-                "logging_level": logging.getLogger(
-                    "custom_components.homie_proxy"
-                ).getEffectiveLevel(),
-            },
-        }
+            # Skip non-entry keys ("global_config", "debug_view_registered",
+            # "debug_view_instance"). Only entries are dicts with "service".
+            entry_dicts = [
+                d for d in domain_data.values()
+                if isinstance(d, dict) and "service" in d and d["service"] is not None
+            ]
+            instances = {d["service"].name: d["service"] for d in entry_dicts}
 
-        return web.Response(
-            text=json.dumps(info, indent=2, ensure_ascii=False),
-            content_type="application/json",
-            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
-        )
+            instance_info: Dict[str, Any] = {}
+            for name, svc in instances.items():
+                try:
+                    instance_info[name] = {
+                        "name": svc.name,
+                        # Tokens masked: first 4 chars + ***. Full tokens are
+                        # never echoed back so this JSON is safe to share.
+                        "tokens": [_mask_token(t) for t in (svc.tokens or [])],
+                        "token_count": len(svc.tokens or []),
+                        "restrict_out": svc.restrict_out,
+                        # Coerce in case stale entries stored ip_network objects.
+                        "restrict_out_cidrs": [str(c) for c in (svc.restrict_out_cidrs or [])],
+                        "restrict_in_cidrs": [str(c) for c in (svc.restrict_in_cidrs or [])],
+                        "timeout": int(svc.timeout) if svc.timeout is not None else None,
+                        "requires_auth": bool(svc.requires_auth),
+                        "debug_requires_auth": bool(getattr(svc, "debug_requires_auth", True)),
+                        "endpoint_url": f"/api/homie_proxy/{svc.name}",
+                        "status": "active" if svc.view else "inactive",
+                    }
+                except Exception as exc:
+                    _LOGGER.exception("debug: failed to render instance %r", name)
+                    instance_info[name] = {"error": f"render failed: {exc}"}
+
+            info: Dict[str, Any] = {
+                "timestamp": datetime.now().isoformat(),
+                "instances": instance_info,
+                "system": {
+                    "private_cidrs": PRIVATE_CIDRS,
+                    "available_restrictions": ["any", "external", "internal", "custom"],
+                },
+                "debug": {
+                    "authentication_required": self.requires_auth,
+                    "logging_level": logging.getLogger(
+                        "custom_components.homie_proxy"
+                    ).getEffectiveLevel(),
+                },
+            }
+
+            return web.Response(
+                text=json.dumps(info, indent=2, ensure_ascii=False, default=str),
+                content_type="application/json",
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+            )
+
+        except Exception as exc:
+            # Log the full traceback to HA logs so we can diagnose; return a
+            # JSON error body instead of the aiohttp 500 stub.
+            _LOGGER.exception("Debug view crashed: %s", exc)
+            return web.Response(
+                text=json.dumps({
+                    "error": "debug view crashed",
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                    "hint": "see Home Assistant logs (search 'homie_proxy') for full traceback",
+                }, indent=2),
+                status=500,
+                content_type="application/json",
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
 
 
 # ─── Service ──────────────────────────────────────────────────────────────────
@@ -657,12 +992,28 @@ class HomieProxyService:
 
         # Register the debug view once per HA run, tracked via hass.data so it
         # survives entry remove → re-add without attempting to re-register the URL.
+        # Note: aiohttp's router doesn't support unregistering a view, hence
+        # the once-per-run pattern.
         domain_data: Dict[str, Any] = self.hass.data.setdefault(DOMAIN, {})
         if not domain_data.get("debug_view_registered"):
             debug_view = HomieProxyDebugView(requires_auth=self.debug_requires_auth)
             self.hass.http.register_view(debug_view)
             domain_data["debug_view_registered"] = True
+            # Keep a reference so auth can be toggled live without re-registration.
+            domain_data["debug_view_instance"] = debug_view
             _LOGGER.info("Registered debug endpoint at /api/homie_proxy/debug")
+        else:
+            # View already registered (re-setup after entry reload). Apply
+            # THIS entry's debug_requires_auth to the live view so the saved
+            # value takes effect immediately — without this, a reload would
+            # reuse whatever value was set the first time HA started.
+            existing_view = domain_data.get("debug_view_instance")
+            if existing_view is not None and existing_view.requires_auth != self.debug_requires_auth:
+                existing_view.requires_auth = self.debug_requires_auth
+                _LOGGER.info(
+                    "Debug endpoint auth applied from entry '%s': requires_auth=%s",
+                    self.name, self.debug_requires_auth,
+                )
 
         self.view = HomieProxyView(
             proxy_instance=self.proxy_instance,
@@ -710,7 +1061,8 @@ class HomieProxyService:
         self.debug_requires_auth = debug_requires_auth
 
         if self.proxy_instance is not None:
-            self.proxy_instance.tokens = set(tokens)
+            self.proxy_instance.tokens = list(tokens)
+            self.proxy_instance._token_bytes = [t.encode("utf-8") for t in tokens]
             self.proxy_instance.restrict_out = (
                 restrict_out if restrict_out in ("any", "external", "internal", "custom") else "any"
             )
@@ -722,6 +1074,16 @@ class HomieProxyService:
         # picks it up on the next request without a full entry reload.
         if self.view is not None:
             self.view.requires_auth = requires_auth
+
+        # Propagate debug-auth change to the shared debug view if it exists.
+        domain_data = self.hass.data.get(DOMAIN, {})
+        debug_view = domain_data.get("debug_view_instance")
+        if debug_view is not None and debug_view.requires_auth != debug_requires_auth:
+            debug_view.requires_auth = debug_requires_auth
+            _LOGGER.info(
+                "Debug endpoint auth updated: requires_auth=%s (changed by entry '%s')",
+                debug_requires_auth, self.name,
+            )
 
         _LOGGER.info(
             "Updated proxy '%s': %d token(s), timeout=%ds, out=%s, in_cidrs=%d",

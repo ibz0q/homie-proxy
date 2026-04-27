@@ -156,6 +156,7 @@ def _load_entry_data(entry_data: Dict[str, Any]) -> Dict[str, Any]:
         "restrict_out_cidrs": list(out_cidrs or []),
         "restrict_in_cidrs": list(in_cidrs or []),
         "requires_auth": bool(entry_data.get("requires_auth", True)),
+        "debug_requires_auth": bool(entry_data.get("debug_requires_auth", True)),
         "timeout": int(entry_data.get("timeout", DEFAULT_TIMEOUT)),
     }
 
@@ -434,6 +435,7 @@ class OptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             self._persist({
                 "requires_auth": bool(user_input.get("requires_auth", True)),
+                "debug_requires_auth": bool(user_input.get("debug_requires_auth", True)),
                 "timeout": int(user_input.get("timeout", DEFAULT_TIMEOUT)),
             })
             await self._reload()
@@ -441,6 +443,7 @@ class OptionsFlow(config_entries.OptionsFlow):
 
         schema = vol.Schema({
             vol.Required("requires_auth", default=data["requires_auth"]): selector.BooleanSelector(),
+            vol.Required("debug_requires_auth", default=data["debug_requires_auth"]): selector.BooleanSelector(),
             vol.Required("timeout", default=data["timeout"]): TIMEOUT_SELECTOR,
         })
         return self.async_show_form(step_id="settings", data_schema=schema)
@@ -525,6 +528,7 @@ class OptionsFlow(config_entries.OptionsFlow):
                 "restrict_out_cidrs": _format_list(data["restrict_out_cidrs"]) or "(none)",
                 "restrict_in_cidrs": _format_list(data["restrict_in_cidrs"]) or "(none)",
                 "requires_auth": "yes" if data["requires_auth"] else "no",
+                "debug_requires_auth": "yes" if data["debug_requires_auth"] else "**no (open)**",
                 "timeout": str(data["timeout"]),
                 "curl_sample": curl_sample,
                 "post_sample": post_sample,

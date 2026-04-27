@@ -71,9 +71,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     requires_auth = cfg["requires_auth"]
     timeout = cfg["timeout"]
 
-    # Get global debug configuration
-    global_config = hass.data[DOMAIN].get("global_config", {})
-    debug_requires_auth = global_config.get("debug_requires_auth", True)
+    # Read debug auth from the per-entry config (falls back to the legacy YAML
+    # global config so existing deployments don't change behaviour on upgrade).
+    debug_requires_auth = cfg.get(
+        "debug_requires_auth",
+        hass.data[DOMAIN].get("global_config", {}).get("debug_requires_auth", True),
+    )
 
     if not tokens:
         _LOGGER.error("No tokens configured for Homie Proxy instance '%s'", name)
@@ -150,8 +153,10 @@ async def async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None
     proxy_service = instance_data["service"]
 
     cfg = _load_entry_data(entry.data)
-    global_config = hass.data[DOMAIN].get("global_config", {})
-    debug_requires_auth = global_config.get("debug_requires_auth", True)
+    debug_requires_auth = cfg.get(
+        "debug_requires_auth",
+        hass.data[DOMAIN].get("global_config", {}).get("debug_requires_auth", True),
+    )
 
     await proxy_service.update(
         tokens=cfg["tokens"],

@@ -32,8 +32,11 @@ Example programmatic configuration:
     server.run()
 """
 
+import hmac
 import json
 import ipaddress
+import logging
+import re
 import ssl
 import urllib.parse
 import asyncio
@@ -44,6 +47,100 @@ from typing import Dict, List, Optional
 import socket
 import os
 import time
+
+_LOGGER = logging.getLogger(__name__)
+
+
+# ─── Security limits & defensive constants ───────────────────────────────────
+
+# Mirror of custom_components/homie_proxy/const.py PRIVATE_CIDRS. Kept here so
+# the standalone module has zero internal dependencies. If you change one,
+# change the other (or extract a shared `homie_proxy_common` package).
+PRIVATE_CIDRS = [
+    "0.0.0.0/8",        # RFC 1122 "this network" — routes to localhost on Linux
+    "10.0.0.0/8",       # RFC 1918
+    "172.16.0.0/12",    # RFC 1918
+    "192.168.0.0/16",   # RFC 1918
+    "127.0.0.0/8",      # IPv4 loopback
+    "169.254.0.0/16",   # IPv4 link-local — covers cloud metadata 169.254.169.254
+    "100.64.0.0/10",    # CGNAT (RFC 6598)
+    "::/128",           # IPv6 unspecified
+    "::1/128",          # IPv6 loopback
+    "fe80::/10",        # IPv6 link-local
+    "fc00::/7",         # IPv6 ULA (RFC 4193)
+]
+_PRIVATE_NETWORKS = [ipaddress.ip_network(c) for c in PRIVATE_CIDRS]
+
+_ALLOWED_SCHEMES = frozenset({"http", "https", "ws", "wss"})
+
+MAX_REDIRECT_HOPS = 5
+
+# Streaming chunk size — see HA proxy.py for rationale (64 KB = ~8× fewer
+# event-loop wakeups vs 8 KB on MJPEG / video streams).
+STREAM_CHUNK_SIZE = 64 * 1024
+
+# Per-process DNS cache for outbound-policy checks. See HA proxy.py for the
+# detailed rationale; keep DNS_CACHE_TTL in sync between the two modules.
+DNS_CACHE_TTL = 30.0
+_DNS_CACHE: "Dict[str, tuple]" = {}
+
+_REDACT_QS_RE = re.compile(
+    r"(?i)(?P<key>token|password|secret|api[_-]?key)=[^&\s]*"
+)
+
+
+def _redact_url(url: str) -> str:
+    if not url:
+        return url
+    return _REDACT_QS_RE.sub(r"\g<key>=***", url)
+
+
+def _mask_token(token: str) -> str:
+    if not token or len(token) <= 4:
+        return "***"
+    return f"{token[:4]}***"
+
+
+async def _resolve_cached(hostname: str) -> Optional[List[str]]:
+    """Resolve *hostname* to a list of IP-literal strings, with TTL caching.
+
+    Returns None on resolution failure (caller fails closed). Negative
+    results are NOT cached — a transient DNS failure shouldn't darken
+    an endpoint for 30 seconds.
+    """
+    now = time.monotonic()
+    entry = _DNS_CACHE.get(hostname)
+    if entry is not None:
+        ts, addrs = entry
+        if now - ts < DNS_CACHE_TTL:
+            return addrs
+
+    loop = asyncio.get_running_loop()
+    try:
+        info = await loop.getaddrinfo(
+            hostname, None, type=socket.SOCK_STREAM,
+        )
+    except OSError:
+        return None
+    if not info:
+        return None
+
+    addrs: List[str] = []
+    for entry_t in info:
+        try:
+            addrs.append(entry_t[4][0])
+        except (IndexError, TypeError):
+            return None
+    if not addrs:
+        return None
+
+    _DNS_CACHE[hostname] = (now, addrs)
+    return addrs
+
+
+def _dns_cache_clear() -> None:
+    """Test hook — clear the DNS cache between tests."""
+    _DNS_CACHE.clear()
 
 # `websockets` is required for WebSocket proxying. We import it defensively so
 # the rest of the proxy still loads if it's missing (HTTP-only mode); upgrade
@@ -107,24 +204,29 @@ def create_default_config() -> Dict:
     Returns:
         Default configuration dictionary
     """
+    # NOTE: every instance MUST have at least one token. As of the security
+    # hardening pass, an instance with an empty `tokens` list rejects every
+    # request with 401 (was: allowed all requests). Replace the placeholders
+    # below before exposing the proxy to anything.
+    import uuid
     return {
         "instances": {
             "default": {
                 "restrict_out": "both",
-                "tokens": ["your-secret-token-here"],
+                "tokens": [str(uuid.uuid4())],
                 "restrict_in_cidrs": [],
                 "timeout": 300
             },
             "internal-only": {
                 "restrict_out": "internal",
-                "tokens": [],
+                "tokens": [str(uuid.uuid4())],
                 "restrict_in_cidrs": [],
                 "timeout": 300
             },
             "custom-networks": {
                 "restrict_out": "both",
                 "restrict_out_cidrs": ["8.8.8.0/24", "1.1.1.0/24"],
-                "tokens": ["custom-token"],
+                "tokens": [str(uuid.uuid4())],
                 "restrict_in_cidrs": [],
                 "timeout": 300
             }
@@ -176,6 +278,11 @@ async def get_shared_session() -> aiohttp.ClientSession:
             limit_per_host=16,
             keepalive_timeout=60,
             enable_cleanup_closed=True,
+            # aiohttp's connect-time DNS cache, complementing our policy-check
+            # cache in _resolve_cached(). Both expire on the same TTL so they
+            # converge on a refresh together.
+            use_dns_cache=True,
+            ttl_dns_cache=int(DNS_CACHE_TTL),
         )
         _shared_session = aiohttp.ClientSession(connector=connector)
     return _shared_session
@@ -201,7 +308,11 @@ async def _get_ssl_session(key: str, ctx: ssl.SSLContext) -> aiohttp.ClientSessi
     """Return a cached aiohttp session that uses *ctx* for all connections."""
     if key not in _ssl_sessions or _ssl_sessions[key].closed:
         _ssl_sessions[key] = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=ctx)
+            connector=aiohttp.TCPConnector(
+                ssl=ctx,
+                use_dns_cache=True,
+                ttl_dns_cache=int(DNS_CACHE_TTL),
+            )
         )
     return _ssl_sessions[key]
 
@@ -295,7 +406,7 @@ async def handle_streaming_request(
                     resp_headers.setdefault(h, v)
             stream_resp = web.StreamResponse(status=upstream.status, headers=resp_headers)
             await stream_resp.prepare(request)
-            async for chunk in upstream.content.iter_chunked(8192):
+            async for chunk in upstream.content.iter_chunked(STREAM_CHUNK_SIZE):
                 await stream_resp.write(chunk)
             await stream_resp.write_eof()
             return stream_resp
@@ -307,13 +418,33 @@ async def handle_streaming_request(
 
 
 async def _do_proxied_request(session, method, target_url, headers, body,
-                              follow_redirects, timeout, query_params):
+                              follow_redirects, timeout, query_params,
+                              proxy_instance=None):
     """Execute a single buffered proxied request on the supplied session.
+
     Retries once on a stale keep-alive socket — Hikvision (and many other
     embedded HTTP servers) drop idle TCP connections without notifying us,
     so the first reuse from the pool fails with `ServerDisconnectedError`.
-    `body` is bytes for our use cases (XML / form data / no body), so it
-    is safe to resend."""
+    `body` is bytes for our use cases (XML / form data / no body), so it is
+    safe to resend.
+
+    When `follow_redirects=True` AND the proxy instance has a tighter
+    outbound policy than 'both/any', redirects are followed manually with
+    re-validation on every hop. Otherwise an open redirector at a public
+    URL could bounce the proxy to internal IPs.
+    """
+    needs_manual = (
+        follow_redirects
+        and proxy_instance is not None
+        and getattr(proxy_instance, 'restrict_out', 'both') not in ('both', 'any')
+    )
+
+    if needs_manual:
+        return await _do_proxied_request_with_revalidation(
+            session, method, target_url, headers, body, timeout,
+            query_params, proxy_instance,
+        )
+
     request_kwargs = {
         'method': method,
         'url': target_url,
@@ -345,12 +476,93 @@ async def _do_proxied_request(session, method, target_url, headers, body,
                     'data': response_data,
                 }
         except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
-            # Likely a stale keep-alive socket the upstream silently closed.
-            # Drop it and try once on a fresh connection.
             last_err = e
-            print(f"Retrying after stale-connection error ({type(e).__name__}): {e}")
+            _LOGGER.debug(f"Retrying after stale-connection error ({type(e).__name__}): {e}")
             continue
     raise last_err
+
+
+async def _do_proxied_request_with_revalidation(
+    session, method, target_url, headers, body, timeout,
+    query_params, proxy_instance,
+):
+    """Manually follow up to MAX_REDIRECT_HOPS redirects, re-validating each
+    new target against the outbound policy. Used when the caller asked for
+    redirect-following AND the instance has tighter-than-'both' restrictions
+    — protects against open-redirector → SSRF pivots."""
+    seen: set = set()
+    current_url = target_url
+    current_method = method
+    current_body = body
+    excluded_response_header = {'connection', 'transfer-encoding', 'content-encoding'}
+
+    for _hop in range(MAX_REDIRECT_HOPS + 1):
+        if current_url in seen:
+            _LOGGER.warning(
+                "homie_proxy/%s: redirect loop detected (url=%s)",
+                proxy_instance.name, _redact_url(current_url),
+            )
+            return {'success': False, 'status': 508, 'error': 'Redirect loop detected'}
+        seen.add(current_url)
+
+        request_kwargs = {
+            'method': current_method, 'url': current_url,
+            'headers': headers, 'allow_redirects': False, 'timeout': timeout,
+        }
+        if current_body is not None:
+            request_kwargs['data'] = current_body
+
+        async with session.request(**request_kwargs) as response:
+            if not (300 <= response.status < 400):
+                response_header = {
+                    h: v for h, v in response.headers.items()
+                    if h.lower() not in excluded_response_header
+                }
+                for key, values in query_params.items():
+                    if key.startswith('response_header[') and key.endswith(']'):
+                        response_header[key[16:-1]] = values[0]
+                return {
+                    'success': True,
+                    'status': response.status,
+                    'headers': response_header,
+                    'data': await response.read(),
+                }
+
+            location = response.headers.get('Location')
+            if not location:
+                response_header = {
+                    h: v for h, v in response.headers.items()
+                    if h.lower() not in excluded_response_header
+                }
+                return {
+                    'success': True,
+                    'status': response.status,
+                    'headers': response_header,
+                    'data': await response.read(),
+                }
+
+            next_url = urllib.parse.urljoin(current_url, location)
+            if not await proxy_instance.is_target_url_allowed(next_url):
+                _LOGGER.warning(
+                    "homie_proxy/%s: 403 redirect target rejected "
+                    "(from=%s, to=%s, mode=%s) — open-redirect SSRF blocked",
+                    proxy_instance.name,
+                    _redact_url(current_url), _redact_url(next_url),
+                    proxy_instance.restrict_out,
+                )
+                return {'success': False, 'status': 403,
+                        'error': 'Redirect target blocked by access policy'}
+
+            current_url = next_url
+            if response.status in (301, 302, 303) and current_method in ('POST', 'PUT', 'PATCH'):
+                current_method = 'GET'
+                current_body = None
+
+    _LOGGER.warning(
+        "homie_proxy/%s: 508 too many redirects",
+        proxy_instance.name,
+    )
+    return {'success': False, 'status': 508, 'error': 'Too many redirects'}
 
 
 async def async_proxy_request(proxy_instance: 'ProxyInstance', request_data: dict) -> dict:
@@ -400,6 +612,7 @@ async def async_proxy_request(proxy_instance: 'ProxyInstance', request_data: dic
         return await _do_proxied_request(
             session, method, target_url, headers, body,
             follow_redirects, timeout, query_params,
+            proxy_instance=proxy_instance,
         )
 
     except aiohttp.ClientError as e:
@@ -415,16 +628,19 @@ async def async_proxy_request(proxy_instance: 'ProxyInstance', request_data: dic
 
 class ProxyInstance:
     """Configuration for a proxy instance"""
-    
+
     def __init__(self, name: str, config: Dict):
         self.name = name
-        # New naming scheme for network access control
-        self.restrict_out = config.get('restrict_out', 'both')  # external, internal, both
+        self.restrict_out = config.get('restrict_out', 'both')  # external, internal, both, custom
         self.restrict_out_cidrs = [ipaddress.ip_network(cidr) for cidr in config.get('restrict_out_cidrs', [])]
-        self.tokens = set(config.get('tokens', []))
+        # Tokens stored as a list (not set) so iteration order is stable for
+        # constant-time comparison. The bytes form is cached so we don't
+        # re-encode on every request.
+        self.tokens = list(config.get('tokens', []))
+        self._token_bytes = [t.encode('utf-8') for t in self.tokens]
         self.restrict_in_cidrs = [ipaddress.ip_network(cidr) for cidr in config.get('restrict_in_cidrs', [])]
-        self.timeout = config.get('timeout', 300)  # Default 5 minutes
-        
+        self.timeout = config.get('timeout', 300)
+
         # Backward compatibility - support old parameter names
         if 'access_mode' in config:
             self.restrict_out = config['access_mode']
@@ -438,67 +654,108 @@ class ProxyInstance:
             self.restrict_out_cidrs = [ipaddress.ip_network(cidr) for cidr in config['allowed_networks_cidrs']]
         if 'allowed_networks_out_cidrs' in config:
             self.restrict_out_cidrs = [ipaddress.ip_network(cidr) for cidr in config['allowed_networks_out_cidrs']]
-    
+
     def is_client_access_allowed(self, client_ip: str) -> bool:
-        """Check if client IP is allowed to access this proxy instance"""
+        """Check if client IP is allowed to access this proxy instance."""
         try:
             ip = ipaddress.ip_address(client_ip)
-            
-            # If restrict_in_cidrs is specified, check against them
             if self.restrict_in_cidrs:
                 return any(ip in cidr for cidr in self.restrict_in_cidrs)
-            else:
-                # If not specified, allow all IPs (0.0.0.0/0)
-                return True
-                
+            return True
         except ValueError:
             return False
-    
-    async def is_target_url_allowed(self, target_url: str) -> bool:
-        """Check if the target URL is allowed based on network access configuration.
 
-        DNS resolution is performed asynchronously via the event loop's
-        getaddrinfo() so the server never blocks on a synchronous syscall.
+    def _check_ip(self, target_ip: ipaddress._BaseAddress) -> bool:
+        """Apply the configured outbound policy to a single resolved address."""
+        # Custom CIDR list takes precedence over mode keyword.
+        if self.restrict_out_cidrs:
+            return any(target_ip in cidr for cidr in self.restrict_out_cidrs)
+        if self.restrict_out == 'external':
+            return not any(target_ip in net for net in _PRIVATE_NETWORKS)
+        if self.restrict_out == 'internal':
+            return any(target_ip in net for net in _PRIVATE_NETWORKS)
+        # 'both' / 'any' / anything else
+        return True
+
+    async def is_target_url_allowed(
+        self,
+        target_url: str,
+        *,
+        _parsed: Optional[urllib.parse.ParseResult] = None,
+    ) -> bool:
+        """Check if the target URL is allowed by the outbound policy.
+
+        Hardening notes:
+          * Scheme allowlist (http/https/ws/wss) — file://, gopher://, etc.
+            are rejected up-front.
+          * Multi-IP validation — when a hostname resolves to several
+            addresses, EVERY address must satisfy the policy. This blocks
+            the multi-A-record / DNS-rebinding SSRF where an attacker
+            returns [public-ip, private-ip] and aiohttp later connects to
+            the private one.
+          * Uses an explicit PRIVATE_CIDRS list rather than Python's
+            `is_private` (whose coverage varies by Python version — 100.64/10
+            was only added in 3.11).
+
+        ``_parsed`` lets the request handler avoid re-parsing the same URL
+        twice per request (it parses once for hostname extraction, once for
+        the policy check). Public callers / tests use the simple
+        ``is_target_url_allowed(url)`` form.
+
+        DNS results are cached for ``DNS_CACHE_TTL`` seconds; see
+        ``_resolve_cached``.
         """
         try:
-            parsed_url = urllib.parse.urlparse(target_url)
-            hostname = parsed_url.hostname
+            parsed = _parsed if _parsed is not None else urllib.parse.urlparse(target_url)
+            scheme = (parsed.scheme or '').lower()
+            if scheme not in _ALLOWED_SCHEMES:
+                return False
 
+            hostname = parsed.hostname
             if not hostname:
                 return False
 
             try:
-                target_ip = ipaddress.ip_address(hostname)  # already an IP literal
+                target_ip = ipaddress.ip_address(hostname)
+                return self._check_ip(target_ip)
             except ValueError:
-                # Hostname — resolve without blocking the event loop.
-                loop = asyncio.get_running_loop()
+                pass  # not an IP literal — DNS-resolve below
+
+            addrs = await _resolve_cached(hostname)
+            if addrs is None:
+                return False
+            for s in addrs:
                 try:
-                    info = await loop.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-                    target_ip = ipaddress.ip_address(info[0][4][0])
-                except (OSError, IndexError, ValueError):
+                    addr = ipaddress.ip_address(s)
+                except ValueError:
                     return False
-
-            # Custom CIDR list takes precedence over mode keyword.
-            if self.restrict_out_cidrs:
-                return any(target_ip in cidr for cidr in self.restrict_out_cidrs)
-
-            if self.restrict_out == 'external':
-                # Python's is_private covers RFC 1918, loopback, link-local etc.
-                return not target_ip.is_private and not target_ip.is_loopback
-            elif self.restrict_out == 'internal':
-                return target_ip.is_private or target_ip.is_loopback
-            else:  # 'both' / 'any' / anything else
-                return True
+                if not self._check_ip(addr):
+                    return False
+            return True
 
         except Exception:
             return False
-    
-    def is_token_valid(self, token: str) -> bool:
-        """Check if a token is valid for this instance"""
-        # If no tokens are configured, allow all requests
-        if not self.tokens:
-            return True
-        return token in self.tokens
+
+    def is_token_valid(self, token: Optional[str]) -> bool:
+        """Constant-time token check.
+
+        Behavioural change from the previous version: when NO tokens are
+        configured, the instance now denies every request (was: allowed
+        every request). Allowing all when no tokens are set is the wrong
+        default for a security-sensitive component — secure-by-default.
+        """
+        if not token or not self._token_bytes:
+            return False
+        try:
+            given = token.encode('utf-8')
+        except (UnicodeEncodeError, AttributeError):
+            return False
+        result = False
+        # Iterate ALL configured tokens (no short-circuit).
+        for tb in self._token_bytes:
+            if hmac.compare_digest(given, tb):
+                result = True
+        return result
 
 
 class HomieProxyRequestHandler:
@@ -626,6 +883,7 @@ class HomieProxyRequestHandler:
     
     async def handle_request(self, request: web.Request) -> web.Response:
         """Main request handler for all HTTP methods"""
+        inst_name = self.proxy_instance.name
         try:
             method = request.method
             client_ip = self.get_client_ip(request)
@@ -638,13 +896,6 @@ class HomieProxyRequestHandler:
                     query_params[key] = [value]
 
             # Optional CORS preflight short-circuit (opt-in via ?cors_preflight=1).
-            # Browsers send `OPTIONS` before any non-simple cross-origin request
-            # to ask "is this allowed?". Many upstream services don't speak CORS
-            # (e.g. IP cameras return 401 / close the connection), so forwarding
-            # OPTIONS makes the preflight fail and the browser blocks the real
-            # request. When this flag is set, we answer OPTIONS locally with
-            # whatever response_header[...] values the client supplied — the
-            # proxy stays generic and the caller fully owns the CORS policy.
             if method == 'OPTIONS':
                 cors_preflight_param = query_params.get('cors_preflight', ['0'])[0].lower()
                 if cors_preflight_param in ('1', 'true', 'yes'):
@@ -654,40 +905,55 @@ class HomieProxyRequestHandler:
                             cors_headers[key[16:-1]] = values[0]
                     return web.Response(status=204, headers=cors_headers)
 
-            target_urls = query_params.get('url', [])
-            if not target_urls:
-                return self.send_error_response(400, "Target URL required", query_params)
-
-            target_url = target_urls[0]
-
             # ── Token auth first — prevents leaking access-control details ──
             tokens = query_params.get('token', [])
             token = tokens[0] if tokens else None
             if not self.proxy_instance.is_token_valid(token):
+                _LOGGER.warning(
+                    "homie_proxy/%s: 401 auth failed (client_ip=%s, "
+                    "token_prefix=%s) — possible brute force / leaked token",
+                    inst_name, client_ip, _mask_token(token or ""),
+                )
                 return self.send_error_response(401, "Invalid or missing token", query_params)
 
             # Check inbound IP
             if not self.proxy_instance.is_client_access_allowed(client_ip):
-                self.log_message(f"Client IP access denied: {client_ip} for '{self.proxy_instance.name}'")
+                _LOGGER.warning(
+                    "homie_proxy/%s: 403 inbound IP rejected (client_ip=%s) — "
+                    "valid token used from non-allowlisted network",
+                    inst_name, client_ip,
+                )
                 return self.send_error_response(403, "Access denied from your IP", query_params)
 
-            self.log_message(f"Client IP allowed: {client_ip} for '{self.proxy_instance.name}'")
+            target_urls = query_params.get('url', [])
+            if not target_urls:
+                return self.send_error_response(400, "Target URL required", query_params)
+            target_url = target_urls[0]
 
-            # Check outbound URL (now async — DNS resolved without blocking)
-            if not await self.proxy_instance.is_target_url_allowed(target_url):
-                self.log_message(f"Target URL denied: {target_url}")
+            # Parse once and share with the policy check below — saves a
+            # second urllib.parse.urlparse() call per request.
+            parsed_target = urllib.parse.urlparse(target_url)
+            original_hostname = parsed_target.hostname
+
+            # Check outbound URL (now async — DNS resolved without blocking,
+            # and cached in _resolve_cached for repeat requests).
+            if not await self.proxy_instance.is_target_url_allowed(
+                target_url, _parsed=parsed_target,
+            ):
+                _LOGGER.warning(
+                    "homie_proxy/%s: 403 outbound URL rejected "
+                    "(client_ip=%s, url=%s, mode=%s) — possible SSRF",
+                    inst_name, client_ip,
+                    _redact_url(target_url), self.proxy_instance.restrict_out,
+                )
                 return self.send_error_response(403, "Access denied to the target URL", query_params)
 
-            self.log_message(f"Target URL allowed: {target_url}")
-            
+            self.log_message(f"Target URL allowed: {_redact_url(target_url)}")
+
             # Get request body
             body = None
             if request.can_read_body:
                 body = await request.read()
-            
-            # Parse target URL for hostname
-            parsed_target = urllib.parse.urlparse(target_url)
-            original_hostname = parsed_target.hostname
             
             # Prepare headers - start with original headers from client
             headers = dict(request.headers)
@@ -998,8 +1264,11 @@ class HomieProxyServer:
                     'restrict_out': instance.restrict_out,
                     'restrict_out_cidrs': [str(cidr) for cidr in instance.restrict_out_cidrs],
                     'restrict_in_cidrs': [str(cidr) for cidr in instance.restrict_in_cidrs],
-                    'tokens': list(instance.tokens),
-                    'timeout': instance.timeout
+                    # Tokens MASKED — never echo full credentials, even on
+                    # the debug endpoint. First 4 chars + ***.
+                    'tokens': [_mask_token(t) for t in instance.tokens],
+                    'token_count': len(instance.tokens),
+                    'timeout': instance.timeout,
                 }
             
             return web.Response(

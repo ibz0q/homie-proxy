@@ -42,9 +42,25 @@ _HOP_BY_HOP_WS = frozenset({
 # Each hop is re-validated against the outbound policy.
 MAX_REDIRECT_HOPS = 5
 
-# Streaming chunk size — 64 KB strikes a balance between throughput and
-# memory. With 8 KB the event loop wakes up ~8× more often per Mbit/s of
-# stream; for 5 Mbps MJPEG that's ~75 saved wakeups per second.
+# Default stream chunk size.
+#
+#   0       → use ``resp.content.iter_any()`` — yields whatever arrived in
+#             the socket buffer right now, no accumulation. THIS IS THE
+#             RIGHT DEFAULT for live MJPEG / HLS / any latency-sensitive
+#             stream: a fixed-size bucket coalesces multiple frames into
+#             one write, which the downstream player then displays in
+#             bursts → visibly choppy video.
+#   N > 0   → use ``iter_chunked(N)``. Buffers up to N bytes before yielding.
+#             Higher throughput / fewer event-loop wakeups, but introduces
+#             latency proportional to N / bitrate. Useful for bulk transfers
+#             (file downloads) but wrong for live streams.
+#
+# Per-instance default; can be overridden per-request via
+# ``?stream_chunk_size=N`` query param.
+DEFAULT_STREAM_CHUNK_SIZE = 0
+
+# Hard cap on the legacy STREAM_CHUNK_SIZE name, kept for any external
+# importers that still reference it. NOT used internally any more.
 STREAM_CHUNK_SIZE = 64 * 1024
 
 # Per-process DNS cache for outbound-policy checks. Entries expire after
@@ -101,6 +117,28 @@ def _dns_cache_clear() -> None:
     """Test hook — clear the DNS cache between tests so monkey-patched
     getaddrinfo isn't shadowed by stale entries from a previous test."""
     _DNS_CACHE.clear()
+
+
+def _disable_nagle(request: Request) -> None:
+    """Set TCP_NODELAY on the inbound (client-facing) socket.
+
+    Without this the kernel's Nagle algorithm coalesces small writes and
+    delivery can stall up to ~40 ms (Nagle + delayed-ACK interaction). For
+    live MJPEG / HLS that stacks on top of any upstream-side buffering and
+    produces visibly choppy video.
+
+    Best-effort: silently no-ops if the transport doesn't expose a real
+    TCP socket (unix sockets, mock transports in tests, already closed)."""
+    try:
+        transport = request.transport
+        if transport is None:
+            return
+        sock = transport.get_extra_info("socket")
+        if sock is None:
+            return
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (OSError, AttributeError):
+        pass
 
 
 # ─── Helpers: log redaction & token masking ──────────────────────────────────
@@ -252,6 +290,7 @@ class ProxyInstance:
         restrict_out_cidrs: Optional[List[str]] = None,
         restrict_in_cidrs: Optional[List[str]] = None,
         timeout: int = 300,
+        stream_chunk_size: int = DEFAULT_STREAM_CHUNK_SIZE,
         restrict_in: Optional[str] = None,      # legacy single-CIDR shim
     ) -> None:
         self.name = name
@@ -261,6 +300,9 @@ class ProxyInstance:
         self.tokens = list(tokens)
         self._token_bytes = [t.encode("utf-8") for t in self.tokens]
         self.timeout = timeout
+        # 0 → iter_any() (low-latency, recommended for live streams).
+        # >0 → iter_chunked(N).
+        self.stream_chunk_size = max(0, int(stream_chunk_size))
 
         if restrict_out not in ("any", "external", "internal", "custom"):
             try:
@@ -499,6 +541,19 @@ class HomieProxyView(HomeAssistantView):
             return await _get_ssl_session(key, ctx)
         return await get_shared_session()
 
+    def _resolve_stream_chunk_size(self, qp: Dict[str, List[str]]) -> int:
+        """Pick the effective stream chunk size for this request.
+
+        Per-request ``?stream_chunk_size=N`` query param wins; falls back to
+        the instance default. ``0`` means "use iter_any()" (low latency).
+        """
+        raw = (qp.get("stream_chunk_size") or [""])[0]
+        if raw and raw.lstrip("-").isdigit():
+            return max(0, int(raw))
+        return getattr(
+            self.proxy_instance, "stream_chunk_size", DEFAULT_STREAM_CHUNK_SIZE,
+        )
+
     # ── Core handler ──────────────────────────────────────────────────────────
 
     async def _handle(self, request: Request, method: str) -> web.Response:
@@ -658,17 +713,38 @@ class HomieProxyView(HomeAssistantView):
                                 resp_headers[key[16:-1]] = values[0]
 
                         if is_streaming:
+                            # Disable Nagle on the inbound socket — without
+                            # this, small frame writes can sit in the kernel
+                            # send-buffer for ~40 ms (Nagle + delayed ACK).
+                            _disable_nagle(request)
+
                             stream_resp = web.StreamResponse(
                                 status=resp.status, headers=resp_headers
                             )
                             await stream_resp.prepare(request)
+
+                            chunk_size = self._resolve_stream_chunk_size(qp)
+                            if chunk_size > 0:
+                                # Bucketed mode — yields when N bytes accrue.
+                                # Higher throughput, more latency.
+                                iterator = resp.content.iter_chunked(chunk_size)
+                            else:
+                                # Low-latency mode — yields whatever the
+                                # socket has right now. Right default for
+                                # live MJPEG / HLS / any streaming media.
+                                iterator = resp.content.iter_any()
+
                             total = 0
-                            async for chunk in resp.content.iter_chunked(STREAM_CHUNK_SIZE):
+                            async for chunk in iterator:
                                 if chunk:
                                     await stream_resp.write(chunk)
                                     total += len(chunk)
                             await stream_resp.write_eof()
-                            _LOGGER.debug("Streamed %d bytes from %s", total, _redact_url(target_url))
+                            _LOGGER.debug(
+                                "Streamed %d bytes from %s (chunk_size=%s)",
+                                total, _redact_url(target_url),
+                                "auto" if chunk_size <= 0 else chunk_size,
+                            )
                             return stream_resp
 
                         data = await resp.read()
@@ -900,6 +976,7 @@ class HomieProxyDebugView(HomeAssistantView):
                         "restrict_out_cidrs": [str(c) for c in (svc.restrict_out_cidrs or [])],
                         "restrict_in_cidrs": [str(c) for c in (svc.restrict_in_cidrs or [])],
                         "timeout": int(svc.timeout) if svc.timeout is not None else None,
+                        "stream_chunk_size": int(getattr(svc, "stream_chunk_size", 0)),
                         "requires_auth": bool(svc.requires_auth),
                         "debug_requires_auth": bool(getattr(svc, "debug_requires_auth", True)),
                         "endpoint_url": f"/api/homie_proxy/{svc.name}",
@@ -963,6 +1040,7 @@ class HomieProxyService:
         timeout: int = 300,
         requires_auth: bool = True,
         debug_requires_auth: bool = True,
+        stream_chunk_size: int = DEFAULT_STREAM_CHUNK_SIZE,
         restrict_in: Optional[str] = None,  # legacy shim
     ) -> None:
         self.hass = hass
@@ -974,6 +1052,7 @@ class HomieProxyService:
         self.timeout = timeout
         self.requires_auth = requires_auth
         self.debug_requires_auth = debug_requires_auth
+        self.stream_chunk_size = max(0, int(stream_chunk_size))
         self.view: Optional[HomieProxyView] = None
         self.proxy_instance: Optional[ProxyInstance] = None
 
@@ -988,6 +1067,7 @@ class HomieProxyService:
             restrict_out_cidrs=self.restrict_out_cidrs,
             restrict_in_cidrs=self.restrict_in_cidrs,
             timeout=self.timeout,
+            stream_chunk_size=self.stream_chunk_size,
         )
 
         # Register the debug view once per HA run, tracked via hass.data so it
@@ -1042,6 +1122,7 @@ class HomieProxyService:
         timeout: int = 300,
         requires_auth: bool = True,
         debug_requires_auth: bool = True,
+        stream_chunk_size: int = DEFAULT_STREAM_CHUNK_SIZE,
         restrict_in: Optional[str] = None,  # legacy shim
     ) -> None:
         """Update proxy policy in-place — no HTTP re-registration needed.
@@ -1059,6 +1140,7 @@ class HomieProxyService:
         self.timeout = timeout
         self.requires_auth = requires_auth
         self.debug_requires_auth = debug_requires_auth
+        self.stream_chunk_size = max(0, int(stream_chunk_size))
 
         if self.proxy_instance is not None:
             self.proxy_instance.tokens = list(tokens)
@@ -1069,6 +1151,7 @@ class HomieProxyService:
             self.proxy_instance.restrict_out_cidrs = ProxyInstance._parse_cidrs(self.restrict_out_cidrs)
             self.proxy_instance.restrict_in_cidrs = ProxyInstance._parse_cidrs(in_list)
             self.proxy_instance.timeout = timeout
+            self.proxy_instance.stream_chunk_size = self.stream_chunk_size
 
         # Propagate HA-auth flag to the live view immediately so the middleware
         # picks it up on the next request without a full entry reload.

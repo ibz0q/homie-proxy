@@ -76,6 +76,16 @@ TIMEOUT_SELECTOR = selector.NumberSelector(
     )
 )
 
+# Stream chunk size — 0 means "low-latency mode" (yields whatever's in the
+# socket buffer immediately; right default for live MJPEG/HLS). Anything
+# >0 buffers up to N bytes per write, trading latency for throughput.
+STREAM_CHUNK_SIZE_SELECTOR = selector.NumberSelector(
+    selector.NumberSelectorConfig(
+        min=0, max=1048576, step=1, unit_of_measurement="bytes",
+        mode=selector.NumberSelectorMode.BOX,
+    )
+)
+
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -158,6 +168,8 @@ def _load_entry_data(entry_data: Dict[str, Any]) -> Dict[str, Any]:
         "requires_auth": bool(entry_data.get("requires_auth", True)),
         "debug_requires_auth": bool(entry_data.get("debug_requires_auth", True)),
         "timeout": int(entry_data.get("timeout", DEFAULT_TIMEOUT)),
+        # 0 = low-latency (iter_any) — recommended for live streams.
+        "stream_chunk_size": max(0, int(entry_data.get("stream_chunk_size", 0))),
     }
 
 
@@ -437,6 +449,7 @@ class OptionsFlow(config_entries.OptionsFlow):
                 "requires_auth": bool(user_input.get("requires_auth", True)),
                 "debug_requires_auth": bool(user_input.get("debug_requires_auth", True)),
                 "timeout": int(user_input.get("timeout", DEFAULT_TIMEOUT)),
+                "stream_chunk_size": max(0, int(user_input.get("stream_chunk_size", 0))),
             })
             await self._reload()
             return await self.async_step_init()
@@ -445,6 +458,7 @@ class OptionsFlow(config_entries.OptionsFlow):
             vol.Required("requires_auth", default=data["requires_auth"]): selector.BooleanSelector(),
             vol.Required("debug_requires_auth", default=data["debug_requires_auth"]): selector.BooleanSelector(),
             vol.Required("timeout", default=data["timeout"]): TIMEOUT_SELECTOR,
+            vol.Required("stream_chunk_size", default=data["stream_chunk_size"]): STREAM_CHUNK_SIZE_SELECTOR,
         })
         return self.async_show_form(step_id="settings", data_schema=schema)
 
@@ -530,6 +544,11 @@ class OptionsFlow(config_entries.OptionsFlow):
                 "requires_auth": "yes" if data["requires_auth"] else "no",
                 "debug_requires_auth": "yes" if data["debug_requires_auth"] else "**no (open)**",
                 "timeout": str(data["timeout"]),
+                "stream_chunk_size": (
+                    "0 (low-latency / iter_any)"
+                    if data["stream_chunk_size"] == 0
+                    else f"{data['stream_chunk_size']} bytes"
+                ),
                 "curl_sample": curl_sample,
                 "post_sample": post_sample,
                 "auth_sample": auth_sample,

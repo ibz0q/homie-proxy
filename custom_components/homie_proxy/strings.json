@@ -55,15 +55,18 @@
         }
       },
       "settings": {
-        "title": "Auth & timeout",
+        "title": "Auth, timeout & streaming",
+        "description": "Stream chunk size: 0 = low-latency (recommended for live MJPEG/HLS — yields bytes as they arrive). Any value > 0 buffers up to N bytes per write, trading latency for throughput. Increase only for steady high-bandwidth bulk transfers; for live video, 0 is almost always correct.",
         "data": {
           "requires_auth": "Require Home Assistant authentication on top of the token",
-          "timeout": "Request timeout (seconds)"
+          "debug_requires_auth": "Require HA authentication on the /debug endpoint",
+          "timeout": "Request timeout (seconds)",
+          "stream_chunk_size": "Stream chunk size (bytes, 0 = low-latency mode)"
         }
       },
       "info": {
         "title": "Endpoint info",
-        "description": "**Name:** {name}\n**Endpoint URL:** `{endpoint}`\n**Tokens configured:** {token_count}\n**Outbound mode:** {restrict_out}\n**Outbound CIDRs:** {restrict_out_cidrs}\n**Inbound CIDRs:** {restrict_in_cidrs}\n**Requires HA auth:** {requires_auth}\n**Timeout:** {timeout}s\n\n---\n\n**cURL**\n```\n{curl_sample}\n```\n\n**JavaScript (fetch)**\n```javascript\n{js_sample}\n```\n\n---\n\n**Debug endpoint** (requires HA login): [{debug_endpoint}]({debug_endpoint})\n\nClick Submit to return to the menu."
+        "description": "**Name:** {name}\n**Endpoint URL:** `{endpoint}`\n**Tokens configured:** {token_count}\n**Outbound mode:** {restrict_out}\n**Outbound CIDRs:** {restrict_out_cidrs}\n**Inbound CIDRs:** {restrict_in_cidrs}\n**Requires HA auth:** {requires_auth}\n**Timeout:** {timeout}s\n**Stream chunk size:** {stream_chunk_size}\n\n---\n\n**cURL**\n```\n{curl_sample}\n```\n\n**JavaScript (fetch)**\n```javascript\n{js_sample}\n```\n\n---\n\n**Debug endpoint** (requires HA login): [{debug_endpoint}]({debug_endpoint})\n\nClick Submit to return to the menu."
       }
     },
     "error": {

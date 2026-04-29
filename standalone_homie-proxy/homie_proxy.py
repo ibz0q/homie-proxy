@@ -75,8 +75,24 @@ _ALLOWED_SCHEMES = frozenset({"http", "https", "ws", "wss"})
 
 MAX_REDIRECT_HOPS = 5
 
-# Streaming chunk size — see HA proxy.py for rationale (64 KB = ~8× fewer
-# event-loop wakeups vs 8 KB on MJPEG / video streams).
+# Default stream chunk size.
+#
+#   0       → use ``resp.content.iter_any()`` — yields whatever arrived in
+#             the socket buffer right now, no accumulation. THIS IS THE
+#             RIGHT DEFAULT for live MJPEG / HLS / any latency-sensitive
+#             stream: a fixed-size bucket coalesces multiple frames into
+#             one write, which the downstream player then displays in
+#             bursts → visibly choppy video.
+#   N > 0   → use ``iter_chunked(N)``. Buffers up to N bytes before yielding.
+#             Higher throughput / fewer event-loop wakeups, but introduces
+#             latency proportional to N / bitrate. Useful for bulk transfers
+#             but wrong for live streams.
+#
+# Per-instance default; can be overridden per-request via
+# ``?stream_chunk_size=N`` query param.
+DEFAULT_STREAM_CHUNK_SIZE = 0
+
+# Legacy name kept for any external importers. NOT used internally.
 STREAM_CHUNK_SIZE = 64 * 1024
 
 # Per-process DNS cache for outbound-policy checks. See HA proxy.py for the
@@ -141,6 +157,28 @@ async def _resolve_cached(hostname: str) -> Optional[List[str]]:
 def _dns_cache_clear() -> None:
     """Test hook — clear the DNS cache between tests."""
     _DNS_CACHE.clear()
+
+
+def _disable_nagle(request: web.Request) -> None:
+    """Set TCP_NODELAY on the inbound (client-facing) socket.
+
+    Without this the kernel's Nagle algorithm coalesces small writes and
+    delivery can stall up to ~40 ms (Nagle + delayed-ACK interaction). For
+    live MJPEG / HLS that stacks on top of any upstream-side buffering and
+    produces visibly choppy video.
+
+    Best-effort: silently no-ops if the transport doesn't expose a real
+    TCP socket (unix sockets, mock transports in tests, already closed)."""
+    try:
+        transport = request.transport
+        if transport is None:
+            return
+        sock = transport.get_extra_info("socket")
+        if sock is None:
+            return
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (OSError, AttributeError):
+        pass
 
 # `websockets` is required for WebSocket proxying. We import it defensively so
 # the rest of the proxy still loads if it's missing (HTTP-only mode); upgrade
@@ -383,14 +421,32 @@ async def handle_streaming_request(
     req_headers: dict,
     query_params: dict,
     timeout_default: int,
+    chunk_size_default: int = DEFAULT_STREAM_CHUNK_SIZE,
 ) -> web.StreamResponse:
     """Pipe an upstream response through to the client without buffering.
     Used for live MJPEG, HLS playlists, or any long-running stream that
-    `async_proxy_request`'s `await response.read()` would deadlock on."""
+    `async_proxy_request`'s `await response.read()` would deadlock on.
+
+    Smoothness considerations (see HA proxy.py for full discussion):
+
+      * Default ``chunk_size_default = 0`` → uses ``iter_any()`` which yields
+        as bytes arrive, no accumulation. Critical for MJPEG: a fixed-size
+        bucket coalesces frames and produces choppy playback.
+      * ``TCP_NODELAY`` is set on the inbound socket so per-frame writes
+        flush immediately (avoids ~40 ms Nagle/delayed-ACK stalls).
+      * Per-request override via ``?stream_chunk_size=N`` query param.
+    """
     timeout_param = query_params.get('timeout', [''])[0]
     timeout_seconds = int(timeout_param) if timeout_param and timeout_param.isdigit() else timeout_default
     # No total cap — streams run indefinitely. Time out only on idle reads.
     timeout = aiohttp.ClientTimeout(total=None, sock_read=timeout_seconds)
+
+    # Resolve effective chunk size: query param wins, instance default falls back.
+    raw_cs = query_params.get('stream_chunk_size', [''])[0]
+    if raw_cs and raw_cs.lstrip('-').isdigit():
+        chunk_size = max(0, int(raw_cs))
+    else:
+        chunk_size = max(0, int(chunk_size_default))
 
     # Custom response_header[] from query string (CORS, content-type override, etc.)
     resp_headers: Dict[str, str] = {}
@@ -404,10 +460,23 @@ async def handle_streaming_request(
             for h, v in upstream.headers.items():
                 if h.lower() not in {'connection', 'transfer-encoding', 'content-encoding'}:
                     resp_headers.setdefault(h, v)
+
+            # Inbound TCP_NODELAY before prepare() so the very first frame
+            # of the response also flushes immediately.
+            _disable_nagle(request)
+
             stream_resp = web.StreamResponse(status=upstream.status, headers=resp_headers)
             await stream_resp.prepare(request)
-            async for chunk in upstream.content.iter_chunked(STREAM_CHUNK_SIZE):
-                await stream_resp.write(chunk)
+
+            if chunk_size > 0:
+                iterator = upstream.content.iter_chunked(chunk_size)
+            else:
+                # Low-latency mode — yields whatever the socket has right now.
+                iterator = upstream.content.iter_any()
+
+            async for chunk in iterator:
+                if chunk:
+                    await stream_resp.write(chunk)
             await stream_resp.write_eof()
             return stream_resp
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -640,6 +709,9 @@ class ProxyInstance:
         self._token_bytes = [t.encode('utf-8') for t in self.tokens]
         self.restrict_in_cidrs = [ipaddress.ip_network(cidr) for cidr in config.get('restrict_in_cidrs', [])]
         self.timeout = config.get('timeout', 300)
+        # 0 → iter_any() (low-latency, recommended for live streams).
+        # >0 → iter_chunked(N) — trades latency for fewer event-loop wakeups.
+        self.stream_chunk_size = max(0, int(config.get('stream_chunk_size', DEFAULT_STREAM_CHUNK_SIZE)))
 
         # Backward compatibility - support old parameter names
         if 'access_mode' in config:
@@ -1052,7 +1124,9 @@ class HomieProxyRequestHandler:
             if method == 'GET' and query_params.get('stream', [''])[0] == '1':
                 self.log_message(f"Streaming mode for {target_url}")
                 return await handle_streaming_request(
-                    request, target_url, headers, query_params, self.proxy_instance.timeout,
+                    request, target_url, headers, query_params,
+                    self.proxy_instance.timeout,
+                    self.proxy_instance.stream_chunk_size,
                 )
 
             # Make the async proxy request
@@ -1205,7 +1279,8 @@ class HomieProxyServer:
                 'restrict_out_cidrs': [str(cidr) for cidr in instance.restrict_out_cidrs],
                 'restrict_in_cidrs': [str(cidr) for cidr in instance.restrict_in_cidrs],
                 'tokens': list(instance.tokens),
-                'timeout': instance.timeout
+                'timeout': instance.timeout,
+                'stream_chunk_size': instance.stream_chunk_size,
             }
         return None
     
@@ -1269,6 +1344,7 @@ class HomieProxyServer:
                     'tokens': [_mask_token(t) for t in instance.tokens],
                     'token_count': len(instance.tokens),
                     'timeout': instance.timeout,
+                    'stream_chunk_size': instance.stream_chunk_size,
                 }
             
             return web.Response(

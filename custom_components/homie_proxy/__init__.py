@@ -70,6 +70,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     restrict_in_cidrs = cfg["restrict_in_cidrs"]
     requires_auth = cfg["requires_auth"]
     timeout = cfg["timeout"]
+    stream_chunk_size = cfg["stream_chunk_size"]
 
     # Read debug auth from the per-entry config (falls back to the legacy YAML
     # global config so existing deployments don't change behaviour on upgrade).
@@ -94,6 +95,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             timeout=timeout,
             requires_auth=requires_auth,
             debug_requires_auth=debug_requires_auth,
+            stream_chunk_size=stream_chunk_size,
         )
         
         # Store service instance
@@ -166,6 +168,7 @@ async def async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None
         timeout=cfg["timeout"],
         requires_auth=cfg["requires_auth"],
         debug_requires_auth=debug_requires_auth,
+        stream_chunk_size=cfg["stream_chunk_size"],
     )
 
     instance_data["config"] = entry.data

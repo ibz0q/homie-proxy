@@ -7,16 +7,17 @@
         "data": {
           "name": "Endpoint name",
           "restrict_out": "Outbound network restrictions",
-          "restrict_out_cidrs": "Custom outbound CIDRs (one per line, only used when 'Custom CIDR list' is selected)",
-          "restrict_in_cidrs": "Inbound IP CIDR allow-list (one per line, blank = allow any)",
+          "restrict_out_cidrs": "Custom outbound CIDRs (one per line, or comma-separated — only used when 'Custom CIDR list' is selected)",
+          "restrict_in_cidrs": "Inbound IP CIDR allow-list (one per line, or comma-separated — blank = allow any)",
           "requires_auth": "Require Home Assistant authentication on top of the token",
           "timeout": "Request timeout (seconds)"
         }
       }
     },
     "error": {
-      "invalid_name": "Name must be at least 2 characters",
-      "invalid_cidr": "One or more CIDR entries are invalid",
+      "invalid_name": "Name must be 2–64 characters",
+      "invalid_name_chars": "Name may only contain letters, digits, hyphen, underscore, and dot",
+      "invalid_cidr": "Invalid CIDR entry",
       "custom_requires_cidrs": "Custom mode requires at least one CIDR",
       "already_configured": "An endpoint with this name already exists",
       "unknown": "Unexpected error"
@@ -31,10 +32,18 @@
         "title": "Configure HomieProxy",
         "description": "Pick a section to edit. Changes apply immediately when you save each step.",
         "menu_options": {
+          "rename": "Rename endpoint",
           "tokens": "Manage access tokens",
           "restrictions": "Network restrictions",
-          "settings": "Auth & timeout",
-          "info": "Show endpoint info"
+          "settings": "Auth, timeout & streaming",
+          "info": "Endpoint info (with help + examples)"
+        }
+      },
+      "rename": {
+        "title": "Rename endpoint",
+        "description": "Current name: **{current_name}**\n\nThe name is the last segment of the endpoint URL — i.e. the part after `/api/homie_proxy/`. Changing it immediately updates the endpoint URL, so update any clients that reference the old name.",
+        "data": {
+          "name": "New endpoint name"
         }
       },
       "tokens": {
@@ -47,30 +56,33 @@
       },
       "restrictions": {
         "title": "Network restrictions",
-        "description": "Outbound mode controls which target URLs the proxy will call. 'Custom CIDR list' uses the outbound CIDRs below; the other modes ignore that field. Inbound CIDRs limit which client IPs may reach this endpoint (blank = any).",
+        "description": "Outbound mode controls which target URLs the proxy will call. 'Custom CIDR list' uses the outbound CIDRs below; the other modes ignore *and clear* that field on save, so stale entries don't sit around. Inbound CIDRs limit which client IPs may reach this endpoint (blank = any).{bad_hint}",
         "data": {
           "restrict_out": "Outbound mode",
-          "restrict_out_cidrs": "Outbound CIDRs (one per line)",
-          "restrict_in_cidrs": "Inbound CIDRs (one per line)"
+          "restrict_out_cidrs": "Outbound CIDRs (one per line, or comma-separated)",
+          "restrict_in_cidrs": "Inbound CIDRs (one per line, or comma-separated)"
         }
       },
       "settings": {
         "title": "Auth, timeout & streaming",
-        "description": "Stream chunk size: 0 = low-latency (recommended for live MJPEG/HLS — yields bytes as they arrive). Any value > 0 buffers up to N bytes per write, trading latency for throughput. Increase only for steady high-bandwidth bulk transfers; for live video, 0 is almost always correct.",
+        "description": "**Require HA auth** adds Home Assistant login on top of the proxy token — recommended when the endpoint is internet-facing. **Require HA auth for debug page** gates `/api/homie_proxy/debug`; disable only on trusted local networks. **Stream chunk size**: 0 = low-latency (recommended for live MJPEG/HLS — yields bytes as they arrive). Any value > 0 buffers up to N bytes per write, trading latency for throughput. For live video, 0 is almost always correct.",
         "data": {
           "requires_auth": "Require Home Assistant authentication on top of the token",
-          "debug_requires_auth": "Require HA authentication on the /debug endpoint",
+          "debug_requires_auth": "Require Home Assistant authentication for the debug page",
           "timeout": "Request timeout (seconds)",
           "stream_chunk_size": "Stream chunk size (bytes, 0 = low-latency mode)"
         }
       },
       "info": {
-        "title": "Endpoint info",
-        "description": "**Name:** {name}\n**Endpoint URL:** `{endpoint}`\n**Tokens configured:** {token_count}\n**Outbound mode:** {restrict_out}\n**Outbound CIDRs:** {restrict_out_cidrs}\n**Inbound CIDRs:** {restrict_in_cidrs}\n**Requires HA auth:** {requires_auth}\n**Timeout:** {timeout}s\n**Stream chunk size:** {stream_chunk_size}\n\n---\n\n**cURL**\n```\n{curl_sample}\n```\n\n**JavaScript (fetch)**\n```javascript\n{js_sample}\n```\n\n---\n\n**Debug endpoint** (requires HA login): [{debug_endpoint}]({debug_endpoint})\n\nClick Submit to return to the menu."
+        "title": "Endpoint info (with help + examples)",
+        "description": "**Name:** {name}\n**Endpoint URL:** `{endpoint}`\n**Tokens configured:** {token_count}\n**Outbound mode:** {restrict_out}\n**Outbound CIDRs:** {restrict_out_cidrs}\n**Inbound CIDRs:** {restrict_in_cidrs}\n**Requires HA auth:** {requires_auth}\n**Debug page HA auth:** {debug_requires_auth}\n**Timeout:** {timeout}s\n**Stream chunk size:** {stream_chunk_size}\n\nClick Submit to return to the menu."
       }
     },
     "error": {
-      "invalid_cidr": "One or more CIDR entries are invalid",
+      "invalid_name": "Name must be 2–64 characters",
+      "invalid_name_chars": "Name may only contain letters, digits, hyphen, underscore, and dot",
+      "already_configured": "An endpoint with this name already exists",
+      "invalid_cidr": "Invalid CIDR entry",
       "custom_requires_cidrs": "Custom mode requires at least one CIDR",
       "tokens_empty": "At least one token is required",
       "unknown": "Unexpected error"

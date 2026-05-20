@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -89,6 +90,23 @@ STREAM_CHUNK_SIZE_SELECTOR = selector.NumberSelector(
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+# Endpoint name becomes the URL slug at /api/homie_proxy/<name>. Restrict to
+# characters that survive a URL path segment unencoded — letters, digits, hyphen,
+# underscore, dot. No /, ?, #, %, spaces, etc.
+_NAME_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_NAME_MIN_LEN = 2
+_NAME_MAX_LEN = 64
+
+
+def _name_error(name: str) -> Optional[str]:
+    """Return an error key if [name] is not a valid endpoint slug, else None."""
+    if len(name) < _NAME_MIN_LEN or len(name) > _NAME_MAX_LEN:
+        return "invalid_name"
+    if not _NAME_SLUG_RE.match(name):
+        return "invalid_name_chars"
+    return None
+
+
 def _generate_token() -> str:
     """Generate a UUIDv4 access token."""
     return str(uuid.uuid4())
@@ -96,7 +114,9 @@ def _generate_token() -> str:
 
 def _parse_cidr_list(text: str) -> List[str]:
     """Parse newline / comma separated CIDR text into a validated list.
-    Raises `vol.Invalid` if any entry is malformed."""
+    Raises `vol.Invalid` if any entry is malformed. The exception message
+    starts with the offending entry so callers can surface it to the user
+    via `description_placeholders`."""
     if not text:
         return []
     raw = [p.strip() for p in text.replace(",", "\n").splitlines()]
@@ -106,8 +126,8 @@ def _parse_cidr_list(text: str) -> List[str]:
             continue
         try:
             ipaddress.ip_network(item, strict=False)
-        except ValueError as e:
-            raise vol.Invalid(f"Invalid CIDR '{item}': {e}") from e
+        except ValueError:
+            raise vol.Invalid(item)
         parsed.append(item)
     return parsed
 
@@ -194,8 +214,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             name = (user_input.get("name") or "").strip()
-            if len(name) < 2:
-                errors["name"] = "invalid_name"
+            name_err = _name_error(name)
+            if name_err is not None:
+                errors["name"] = name_err
             elif any(
                 e.data.get("name") == name
                 for e in self.hass.config_entries.async_entries(DOMAIN)
@@ -298,9 +319,10 @@ class OptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             new_name = (user_input.get("name") or "").strip()
+            name_err = _name_error(new_name)
 
-            if len(new_name) < 2:
-                errors["name"] = "invalid_name"
+            if name_err is not None:
+                errors["name"] = name_err
             elif new_name != data["name"] and any(
                 e.data.get("name") == new_name
                 for e in self.hass.config_entries.async_entries(DOMAIN)
@@ -389,6 +411,9 @@ class OptionsFlow(config_entries.OptionsFlow):
     ) -> config_entries.ConfigFlowResult:
         errors: Dict[str, str] = {}
         data = self._data()
+        # Track the specific bad CIDRs so the user sees which line(s) to fix.
+        bad_out_cidr: Optional[str] = None
+        bad_in_cidr: Optional[str] = None
 
         if user_input is not None:
             mode = user_input.get("restrict_out", "any")
@@ -396,45 +421,78 @@ class OptionsFlow(config_entries.OptionsFlow):
             in_text = user_input.get("restrict_in_cidrs", "") or ""
 
             try:
-                out_cidrs = _parse_cidr_list(out_text)
-            except vol.Invalid:
+                out_cidrs_parsed = _parse_cidr_list(out_text)
+            except vol.Invalid as e:
                 errors["restrict_out_cidrs"] = "invalid_cidr"
-                out_cidrs = []
+                bad_out_cidr = str(e)
+                out_cidrs_parsed = []
 
             try:
-                in_cidrs = _parse_cidr_list(in_text)
-            except vol.Invalid:
+                in_cidrs_parsed = _parse_cidr_list(in_text)
+            except vol.Invalid as e:
                 errors["restrict_in_cidrs"] = "invalid_cidr"
-                in_cidrs = []
+                bad_in_cidr = str(e)
+                in_cidrs_parsed = []
 
-            if mode == "custom" and not out_cidrs and "restrict_out_cidrs" not in errors:
+            # When mode isn't "custom" the outbound CIDR list is ignored by
+            # the proxy logic — and it should be cleared from storage too,
+            # otherwise stale entries silently reappear if the user flips
+            # back to custom later. The user's complaint was that the
+            # textarea kept showing old CIDRs after switching mode, which
+            # implied (incorrectly) that they were still being enforced.
+            out_cidrs_to_save = out_cidrs_parsed if mode == "custom" else []
+
+            if mode == "custom" and not out_cidrs_parsed and "restrict_out_cidrs" not in errors:
                 errors["restrict_out_cidrs"] = "custom_requires_cidrs"
 
             if not errors:
-                self._persist({
+                # Build the merged patch and remove the lingering legacy key
+                # rather than storing it as `None`.
+                merged = {**self.config_entry.data}
+                merged.pop("restrict_in", None)
+                merged.update({
                     "restrict_out": mode,
-                    "restrict_out_cidrs": out_cidrs,
-                    "restrict_in_cidrs": in_cidrs,
-                    # Drop legacy single-CIDR field if it lingered.
-                    "restrict_in": None,
+                    "restrict_out_cidrs": out_cidrs_to_save,
+                    "restrict_in_cidrs": in_cidrs_parsed,
                 })
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=merged,
+                )
                 await self._reload()
                 return await self.async_step_init()
 
+        # Re-render: when there are errors, preserve what the user typed.
+        # On a clean first render, fall back to the persisted values.
+        if user_input is not None:
+            mode_default = user_input.get("restrict_out", data["restrict_out"])
+            out_default = user_input.get("restrict_out_cidrs", _format_list(data["restrict_out_cidrs"]))
+            in_default = user_input.get("restrict_in_cidrs", _format_list(data["restrict_in_cidrs"]))
+        else:
+            mode_default = data["restrict_out"]
+            out_default = _format_list(data["restrict_out_cidrs"])
+            in_default = _format_list(data["restrict_in_cidrs"])
+
         schema = vol.Schema({
-            vol.Required("restrict_out", default=data["restrict_out"]): RESTRICT_MODE_SELECTOR,
-            vol.Optional(
-                "restrict_out_cidrs",
-                default=_format_list(data["restrict_out_cidrs"]),
-            ): CIDR_LIST_SELECTOR,
-            vol.Optional(
-                "restrict_in_cidrs",
-                default=_format_list(data["restrict_in_cidrs"]),
-            ): CIDR_LIST_SELECTOR,
+            vol.Required("restrict_out", default=mode_default): RESTRICT_MODE_SELECTOR,
+            vol.Optional("restrict_out_cidrs", default=out_default): CIDR_LIST_SELECTOR,
+            vol.Optional("restrict_in_cidrs", default=in_default): CIDR_LIST_SELECTOR,
         })
 
+        # HA error keys can't carry parameters; surface the specific bad
+        # entry as an extra description line instead. When neither field
+        # errored we pass empty strings so the line renders blank.
+        bad_lines: List[str] = []
+        if bad_out_cidr:
+            bad_lines.append(f"⚠ Bad outbound CIDR: `{bad_out_cidr}`")
+        if bad_in_cidr:
+            bad_lines.append(f"⚠ Bad inbound CIDR: `{bad_in_cidr}`")
+        bad_hint = ("\n\n" + "\n\n".join(bad_lines)) if bad_lines else ""
+
         return self.async_show_form(
-            step_id="restrictions", data_schema=schema, errors=errors,
+            step_id="restrictions",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"bad_hint": bad_hint},
         )
 
     # ── Settings (auth + timeout) ────────────────────────────────────────────

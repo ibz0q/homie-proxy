@@ -534,9 +534,13 @@ class OptionsFlow(config_entries.OptionsFlow):
 
         # Placeholder hostname shown in examples. Avoid `<…>` because HA's
         # markdown renderer parses those as unclosed HTML tags (UNCLOSED_TAG
-        # translation error).
+        # translation error). Also: HACS's NO_URLS_IN_TRANSLATIONS check
+        # rejects any literal `http(s)://` in the en.json string, so every
+        # example URL has to live in a description_placeholder instead.
         base = "HA_HOST:8123"
         proxy_base = f"http://{base}{endpoint}"
+        url_pattern = f"{proxy_base}?token=YOUR_TOKEN&url=TARGET_URL"
+        target_example = "http://192.168.1.50/api"
 
         curl_sample = (
             f"curl -G '{proxy_base}' \\\n"
@@ -614,5 +618,14 @@ class OptionsFlow(config_entries.OptionsFlow):
                 "tls_sample": tls_sample,
                 "js_sample": js_sample,
                 "debug_endpoint": f"http://{base}/api/homie_proxy/debug",
+                # URL-bearing fragments — HACS rejects literal URLs in the
+                # translation string, so we inject them here as placeholder
+                # values that HA resolves at render time.
+                "url_pattern": url_pattern,
+                "target_example": target_example,
+                "issues_link": "https://github.com/ibz0q/homie-proxy/issues",
+                "hacs_link": "https://hacs.xyz/",
+                "ha_auth_link": "https://www.home-assistant.io/docs/authentication/",
+                "cors_link": "https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS",
             },
         )

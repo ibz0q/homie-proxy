@@ -257,11 +257,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
                 return self.async_create_entry(title=f"HomieProxy — {name}", data=data)
 
+        # See note on the options-flow restrictions step about why the CIDR
+        # fields use `suggested_value` rather than `default=`.
+        out_pref = user_input.get("restrict_out_cidrs") if user_input else ""
+        in_pref = user_input.get("restrict_in_cidrs") if user_input else ""
         schema = vol.Schema({
             vol.Required("name", default=user_input.get("name") if user_input else "external-api-route"): str,
             vol.Required("restrict_out", default=user_input.get("restrict_out") if user_input else "external"): RESTRICT_MODE_SELECTOR,
-            vol.Optional("restrict_out_cidrs", default=user_input.get("restrict_out_cidrs") if user_input else ""): CIDR_LIST_SELECTOR,
-            vol.Optional("restrict_in_cidrs", default=user_input.get("restrict_in_cidrs") if user_input else ""): CIDR_LIST_SELECTOR,
+            vol.Optional(
+                "restrict_out_cidrs",
+                description={"suggested_value": out_pref},
+            ): CIDR_LIST_SELECTOR,
+            vol.Optional(
+                "restrict_in_cidrs",
+                description={"suggested_value": in_pref},
+            ): CIDR_LIST_SELECTOR,
             vol.Required("requires_auth", default=user_input.get("requires_auth", True) if user_input else True): selector.BooleanSelector(),
             vol.Required("timeout", default=user_input.get("timeout", DEFAULT_TIMEOUT) if user_input else DEFAULT_TIMEOUT): TIMEOUT_SELECTOR,
         })
@@ -472,10 +482,25 @@ class OptionsFlow(config_entries.OptionsFlow):
             out_default = _format_list(data["restrict_out_cidrs"])
             in_default = _format_list(data["restrict_in_cidrs"])
 
+        # CIDR fields use `suggested_value`, NOT `default=`. The `default=`
+        # form makes voluptuous re-inject the previously-saved value when
+        # the key is missing from user_input — and the HA frontend OMITS
+        # empty multiline TEXT fields from the submission rather than
+        # sending `""`. Net result with `default=`: user empties the box,
+        # clicks save, voluptuous puts the old value back, save is a
+        # no-op — exact symptom the user hit. `suggested_value` only
+        # pre-fills the form; absent-on-submit stays absent, the handler
+        # above sees `""` from `.get(..., "")`, parses to `[]`, persists.
         schema = vol.Schema({
             vol.Required("restrict_out", default=mode_default): RESTRICT_MODE_SELECTOR,
-            vol.Optional("restrict_out_cidrs", default=out_default): CIDR_LIST_SELECTOR,
-            vol.Optional("restrict_in_cidrs", default=in_default): CIDR_LIST_SELECTOR,
+            vol.Optional(
+                "restrict_out_cidrs",
+                description={"suggested_value": out_default},
+            ): CIDR_LIST_SELECTOR,
+            vol.Optional(
+                "restrict_in_cidrs",
+                description={"suggested_value": in_default},
+            ): CIDR_LIST_SELECTOR,
         })
 
         # HA error keys can't carry parameters; surface the specific bad

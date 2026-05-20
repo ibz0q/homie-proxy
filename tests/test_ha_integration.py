@@ -327,3 +327,74 @@ class TestHAProxyViewOverHTTP:
         )
         assert resp.status == 401
         assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+
+
+# ─── Options-flow regression: clearing CIDRs ─────────────────────────────────
+#
+# Real voluptuous `vol.Optional("key", default=X)` re-injects `X` when the
+# HA frontend OMITS the field on submit (which it does for empty multiline
+# TEXT). That caused a shipped bug: emptying inbound CIDRs in the UI saved
+# the *old* CIDRs back. The fix uses `description={"suggested_value": X}`
+# which pre-fills the form widget but does not inject on missing-key submit.
+#
+# The local voluptuous stub was beefed up to model marker-default
+# substitution faithfully so this class of bug can't slip through CI again.
+
+class TestOptionsFlowClearCIDRs:
+    async def test_empty_submission_clears_saved_inbound_cidrs(self):
+        """Reproduce the exact frontend → backend path that shipped broken:
+        user opens restrictions, deletes the inbound textarea content, hits
+        Save. The frontend omits the multiline TEXT key entirely. After the
+        fix, the saved entry must show `restrict_in_cidrs == []`."""
+        from homie_proxy import config_flow as cf
+
+        # Recreate the same schema the options-flow restrictions step builds
+        # when re-rendering with a saved entry that has CIDRs populated.
+        saved_in = "10.0.0.0/8\n192.168.1.0/24"
+        saved_out = ""
+
+        import voluptuous as vol
+        schema = vol.Schema({
+            vol.Required("restrict_out", default="any"): str,
+            vol.Optional(
+                "restrict_out_cidrs",
+                description={"suggested_value": saved_out},
+            ): str,
+            vol.Optional(
+                "restrict_in_cidrs",
+                description={"suggested_value": saved_in},
+            ): str,
+        })
+
+        # User cleared the textareas; HA frontend strips empty multiline keys
+        # from the submission. Only restrict_out comes through.
+        validated = schema({"restrict_out": "any"})
+
+        # The schema MUST NOT re-inject the saved CIDRs. The handler reads
+        # via .get(key, "") — so a missing key parses to "" → []. With the
+        # broken schema, validated["restrict_in_cidrs"] would be the saved
+        # value and the parse would yield the original list.
+        assert validated.get("restrict_in_cidrs", "") == "", (
+            "schema re-injected saved CIDRs — the empty-clear path is broken"
+        )
+        assert validated.get("restrict_out_cidrs", "") == "", (
+            "schema re-injected saved outbound CIDRs"
+        )
+
+        # Sanity: the parse step the handler runs would produce [] from "".
+        assert cf._parse_cidr_list(validated.get("restrict_in_cidrs", "")) == []
+
+    async def test_default_form_would_have_failed(self):
+        """Direct evidence that the OLD schema shape (`default=...`) would
+        have re-injected the saved CIDRs — this is the regression we are
+        guarding against."""
+        import voluptuous as vol
+        saved_in = "10.0.0.0/8"
+        broken_schema = vol.Schema({
+            vol.Required("restrict_out", default="any"): str,
+            vol.Optional("restrict_in_cidrs", default=saved_in): str,
+        })
+        validated = broken_schema({"restrict_out": "any"})
+        # Confirms the failure mode the user reported.
+        assert validated.get("restrict_in_cidrs") == saved_in
+
